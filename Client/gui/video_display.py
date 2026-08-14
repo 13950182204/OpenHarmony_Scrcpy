@@ -182,8 +182,11 @@ class VideoDisplay:
                     self.canvas.delete(self.status_text_id)
                 
                 fps_text = self.fps
-                frame_count = video_client.frame_count if video_client else 0
-                status_text = f"帧数: {frame_count} | FPS: {fps_text} | 尺寸: {self.display_width}x{self.display_height}"
+                video_size = f"{self.video_width}x{self.video_height}"
+                status_text = (
+                    f"FPS: {fps_text} | "
+                    f"视频: {video_size} | 显示: {self.display_width}x{self.display_height}"
+                )
                 self.status_text_id = self.canvas.create_text(
                     10, 10,
                     anchor=tk.NW,
@@ -194,7 +197,7 @@ class VideoDisplay:
                 )
                 
                 if self.performance_label:
-                    self.performance_label.config(text=f"FPS: {fps_text} | 帧数: {frame_count}")
+                    self.performance_label.config(text=f"FPS: {fps_text}")
                 
                 self.canvas.update_idletasks()
             

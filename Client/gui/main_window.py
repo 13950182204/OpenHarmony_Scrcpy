@@ -169,7 +169,7 @@ class MainWindow:
                                                  font=("Microsoft YaHei", 9), fg="#e74c3c", bg="#34495e", anchor=tk.E)
         self.connection_status_label.pack(side=tk.RIGHT, padx=10)
         
-        self.performance_label = tk.Label(status_frame, text="FPS: 0 | 帧数: 0",
+        self.performance_label = tk.Label(status_frame, text="FPS: 0",
                                           font=("Microsoft YaHei", 9), fg="#3498db", bg="#34495e")
         self.performance_label.pack(side=tk.RIGHT, padx=20)
     
@@ -225,7 +225,7 @@ class MainWindow:
         else:
             self.device_panel.set_connect_button_state("连接", "#2ecc71")
             self.connection_status_label.config(text="未连接", fg="#e74c3c")
-            self.performance_label.config(text="FPS: 0 | 帧数: 0")
+            self.performance_label.config(text="FPS: 0")
     
     def _open_project_url(self, event: Optional[tk.Event] = None) -> None:
         """打开项目地址"""
@@ -449,7 +449,7 @@ class MainWindow:
         self._show_waiting_screen()
         self.device_panel.set_connect_button_state("连接", "#2ecc71")
         self.connection_status_label.config(text="未连接", fg="#e74c3c")
-        self.performance_label.config(text="FPS: 0 | 帧数: 0")
+        self.performance_label.config(text="FPS: 0")
         
         self.server_deployer.deploy(
             selected_device_name=selected,
@@ -578,7 +578,7 @@ class MainWindow:
         self.device_panel.set_connect_button_state("连接", "#2ecc71")
         self.connection_status_label.config(text="未连接", fg="#e74c3c")
         self.device_status_label.config(text="设备: 未连接")
-        self.performance_label.config(text="FPS: 0 | 帧数: 0")
+        self.performance_label.config(text="FPS: 0")
 
         if self.video_display is not None:
             self.video_display.force_garbage_collection()
