@@ -17,6 +17,8 @@
 HDC执行器单元测试
 """
 
+import os
+import subprocess
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 
@@ -72,6 +74,8 @@ class TestHDCCommandExecutor:
         result = executor.execute(["shell", "ls"])
         assert result["success"] == True
         assert result["stdout"] == "output"
+        assert mock_popen.call_args.args[0] == ["/path/to/hdc", "-t", "test_sn", "shell", "ls"]
+        assert mock_popen.call_args.kwargs.get("shell") is None
     
     @patch('subprocess.Popen')
     def test_execute_failure(self, mock_popen):
@@ -98,3 +102,12 @@ class TestHDCCommandExecutor:
         """测试获取当前设备"""
         executor = HDCCommandExecutor(device_sn="test_sn")
         assert executor.get_current_device() == "test_sn"
+
+    def test_windows_popen_hides_hdc_console(self):
+        executor = HDCCommandExecutor()
+        kwargs = executor._popen_platform_kwargs()
+
+        if os.name == "nt":
+            assert kwargs == {"creationflags": subprocess.CREATE_NO_WINDOW}
+        else:
+            assert kwargs == {}

@@ -27,7 +27,6 @@ from typing import Optional, List, Dict, Any
 
 from .constants import LogLevel
 from .logger import print_log
-from utils import get_default_shell_terminal
 
 
 class HDCCommandExecutor:
@@ -111,6 +110,15 @@ class HDCCommandExecutor:
         
         cmd.extend(args)
         return cmd
+
+    @staticmethod
+    def _popen_platform_kwargs() -> Dict[str, int]:
+        """Return child-process flags appropriate for the host platform."""
+        if os.name == "nt":
+            # The client is packaged as a windowed executable. Without this,
+            # every hdc.exe invocation briefly creates a visible console.
+            return {"creationflags": subprocess.CREATE_NO_WINDOW}
+        return {}
     
     def execute(self, args: List[str], need_sn: bool = True, timeout: float = 5.0) -> Dict[str, Any]:
         """执行hdc命令"""
@@ -121,12 +129,12 @@ class HDCCommandExecutor:
         try:
             process = subprocess.Popen(
                 cmd,
-                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding='utf-8',
-                errors='ignore'
+                errors='ignore',
+                **self._popen_platform_kwargs(),
             )
             
             try:
@@ -160,7 +168,8 @@ class HDCCommandExecutor:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding='utf-8',
-                errors='ignore'
+                errors='ignore',
+                **self._popen_platform_kwargs(),
             )
             
             process_id = len(self.async_processes)
@@ -206,60 +215,9 @@ class HDCCommandExecutor:
                     del self.async_processes[process_id]
     
     def execute_async_in_shell(self, args: List[str], need_sn: bool = True, title: str = "Command Output", keep_open: bool = False) -> Optional[subprocess.Popen]:
-        """新开终端窗口异步执行hdc命令"""
-        hdc_cmd = self.assemble_command(args, need_sn)
-        
-        system = platform.system()
-        if system == "Windows":
-            if keep_open:
-                shell_cmd = ["start", f"{title}", "cmd", "/k"]
-                shell_cmd.extend(hdc_cmd)
-            else:
-                shell_cmd = ["start", f"{title}", "cmd", "/c"]
-                shell_cmd.extend(hdc_cmd)
-            process = subprocess.Popen(shell_cmd, shell=True)
-            
-        elif system == "Linux" or system == "Darwin":
-            terminal = get_default_shell_terminal()
-            
-            if keep_open:
-                shell_cmd = f"{hdc_cmd}; echo 'Press Enter to exit...'; read"
-            else:
-                shell_cmd = hdc_cmd
-                
-            if terminal == "gnome-terminal":
-                shell_cmd = " ".join(["gnome-terminal", "--title", title, "--", "bash", "-c", shell_cmd])
-                process = subprocess.Popen(shell_cmd)
-            elif terminal == "konsole":
-                shell_cmd = " ".join(["konsole", "--title", title, "-e", "bash", "-c", shell_cmd])
-                process = subprocess.Popen(shell_cmd)
-            elif terminal == "xterm":
-                shell_cmd = " ".join(["xterm", "-title", title, "-e", f"bash -c '{shell_cmd}'"])
-                process = subprocess.Popen(shell_cmd)
-            elif terminal == "terminator":
-                shell_cmd = " ".join(["terminator", "-T", title, "-e", f"bash -c '{shell_cmd}'"])
-                process = subprocess.Popen(shell_cmd)
-            elif terminal == "osascript":
-                applescript = f'''
-                tell application "Terminal"
-                    do script "{shell_cmd}"
-                    activate
-                end tell
-                '''
-                process = subprocess.Popen(["osascript", "-e", applescript])
-            else:
-                term_cmd = os.environ.get('TERMINAL', 'xterm')
-                shell_cmd = " ".join([term_cmd, "-e", f"bash -c '{shell_cmd}'"])
-                process = subprocess.Popen(shell_cmd)
-        else:
-            print_log(LogLevel.FATAL, self.log_title, f"异步Shell执行: Unsupported platform [{system}]")
-            process = None
-        
-        print_log(LogLevel.DEBUG, self.log_title, f"异步Shell执行: [{shell_cmd}]")
-        if process: 
-            process_id = len(self.async_processes)
-            self.async_processes[process_id] = process
-        return process
+        """后台执行 HDC 命令，不依赖宿主终端或 shell 解析。"""
+        del title, keep_open
+        return self.execute_async_in_process(args, need_sn)
 
     def set_device(self, device_sn: str) -> None:
         """设置当前设备"""
