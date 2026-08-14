@@ -23,6 +23,8 @@
 #include <string>
 #include <functional>
 #include <vector>
+#include <deque>
+#include <mutex>
 
 // OpenHarmony多媒体C-API头文件
 #include <native_avcodec_videoencoder.h>
@@ -33,10 +35,10 @@
 namespace OHScrcpy {
 
 struct CodecConfig {
-    int32_t width;
-    int32_t height;
-    int32_t fps;
-    int32_t bitrate;
+    int width;
+    int height;
+    int fps;
+    int bitrate;
     std::string codec;  // "h264" or "h265"
 };
 
@@ -62,12 +64,10 @@ public:
     ErrorCode Start();
     ErrorCode Stop();
     ErrorCode Destroy();
+    void QueueInputFrame(const uint8_t* data, size_t size, int64_t timestamp);
     
     OHNativeWindow* GetSurface();
     bool IsReady() const;
-    bool IsFirstFrame() const;
-    void ClearIsFirstFrame();
-    void printVideoCodecCapability(const std::string &codec, int32_t width, int32_t height);
     
     void SetOutputCallback(OnOutputCallback callback);
     
@@ -85,8 +85,13 @@ private:
     
     void HandleError(int32_t errorCode);
     void HandleStreamChanged(OH_AVFormat* format);
+    void HandleInputBuffer(uint32_t index, OH_AVBuffer* buffer);
     void HandleOutputBuffer(uint32_t index, OH_AVBuffer* buffer);
+    void SubmitInputBuffer(uint32_t index, OH_AVBuffer* buffer, const std::vector<uint8_t>& data, int64_t timestamp);
     void ParseParameterSets(uint8_t* data, size_t size);
+
+    struct PendingFrame { std::vector<uint8_t> data; int64_t timestamp; };
+    struct AvailableInputBuffer { uint32_t index; OH_AVBuffer* buffer; };
     
     OH_AVCodec* encoder_;
     OHNativeWindow* surface_;
@@ -97,10 +102,13 @@ private:
     std::vector<uint8_t> pps_data_;
     
     OnOutputCallback output_callback_;
-    
+
+    std::mutex input_mutex_;
+    std::deque<PendingFrame> pending_frames_;
+    std::deque<AvailableInputBuffer> available_input_buffers_;
+
     bool is_created_;
     bool is_started_;
-    bool is_first_frame_;
 };
 
 } // namespace OHScrcpy

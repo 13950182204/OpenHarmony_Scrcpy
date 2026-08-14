@@ -1,0 +1,10 @@
+{
+  "name": "ohscrcpy_server",
+  "target_manufacturer": "Dnakeiot",
+  "target_product": "a333_newpines",
+  "target_abi": "aarch64",
+  "protocol": "h264-tcp-v1+input-v1",
+  "canvas": "672x1072",
+  "sha256": "e9b825992a2b49e029e6e4af79107c91f20b5f7ab099b8fefc8f5648cea75fca",
+  "config_sha256": "744a4fae754832d07d60b61540e71ccbdda4d8f32b61d0e2c5476e7f53e558d3"
+}

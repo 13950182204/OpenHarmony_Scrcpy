@@ -26,15 +26,29 @@ ohos_executable("ohscrcpy_server") {
 
   sources = [
     "src/ohscrcpy_server.cpp",
-    "src/codec_wrapper.cpp",
     "src/capture_wrapper.cpp",
     "src/logger.cpp",
   ]
-  
+
   include_dirs = [
     "include",
   ]
-  
+
+  # a333_newpines sets device_type to "default"; device_name identifies this board.
+  if ((device_type == "a333_newpines" || device_name == "a333_newpines") && target_cpu == "arm64") {
+    sources += [ "src/cedarc_encoder.cpp" ]
+    defines = [ "OHSCRCPY_USE_CEDARC" ]
+    include_dirs += [
+      "//device/soc/allwinner/a333/hardware/codec/media/cedarc_demo/include",
+    ]
+    lib_dirs = [
+      "//device/soc/allwinner/a333/hardware/codec/media/lib64",
+    ]
+    libs = [ "awcodec_enc.z" ]
+  } else {
+    sources += [ "src/codec_wrapper.cpp" ]
+  }
+
   deps = [
     "../interfaces/kits/c:native_avscreen_capture",
   ]
@@ -47,7 +61,7 @@ ohos_executable("ohscrcpy_server") {
     "window_manager:libdm",
     "c_utils:utils",
   ]
-  
+
   subsystem_name = "multimedia"
   part_name = "player_framework"
 }
@@ -59,4 +73,3 @@ ohos_prebuilt_etc("ohscrcpy_server_config") {
   subsystem_name = "multimedia"
   part_name = "player_framework"
 }
-

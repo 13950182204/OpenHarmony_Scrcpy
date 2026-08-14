@@ -16,16 +16,21 @@
 /* OHScrcpy 服务端实现 - 基于OpenHarmony C-API */
 
 #include "logger.h"
+#ifdef OHSCRCPY_USE_CEDARC
+#include "cedarc_encoder.h"
+#else
 #include "codec_wrapper.h"
+#endif
 #include "capture_wrapper.h"
 #include "error_codes.h"
 
 #include <iostream>
-#include <sstream>
 #include <thread>
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <functional>
+#include <cstdio>
 #include <cstring>
 #include <charconv>
 #include <unistd.h>
@@ -58,7 +63,7 @@
 
 // 常量定义
 #define DEFAULT_PORT 27183
-#define DEFAULT_FPS 30
+#define DEFAULT_FPS 60
 #define DEFAULT_BITRATE 1500000  // 1.5 Mbps
 #define DEFAULT_WIDTH 720
 #define DEFAULT_HEIGHT 1280
@@ -74,12 +79,19 @@
 #define PACKET_TYPE_VPS            0x00000006
 #define PACKET_TYPE_CONFIG_DATA    0x00000007
 #define PACKET_TYPE_LOG            0x00000008
+#define PACKET_TYPE_INPUT          0x00000009
+
+#define INPUT_ACTION_TOUCH_DOWN    0x00000001
+#define INPUT_ACTION_TOUCH_MOVE    0x00000002
+#define INPUT_ACTION_TOUCH_UP      0x00000003
+#define INPUT_PACKET_SIZE          12
+#define MAX_CONTROL_PACKET_SIZE    64
 
 // 日志文件路径前缀
 #define LOG_FILE_PREFIX "/data/local/tmp/server_"
 
 // 版本信息
-#define VERSION "v2.3"
+#define VERSION "v2.1"
 
 // H.264 NALU类型
 enum H264NaluType {
@@ -146,9 +158,98 @@ struct VideoPacketHeader {
     int32_t packet_size;
 };
 
+class UinputTouchInjector {
+public:
+    UinputTouchInjector() {
+        signal(SIGCHLD, SIG_IGN);
+    }
+
+    bool inject(uint32_t action, int32_t x, int32_t y) {
+        const auto now = std::chrono::steady_clock::now();
+        if (action == INPUT_ACTION_TOUCH_DOWN) {
+            active_ = true;
+            moved_ = false;
+            start_x_ = x;
+            start_y_ = y;
+            last_x_ = x;
+            last_y_ = y;
+            started_at_ = now;
+            return true;
+        }
+        if (!active_) {
+            return false;
+        }
+        if (action == INPUT_ACTION_TOUCH_MOVE) {
+            moved_ = moved_ || x - start_x_ > 8 || start_x_ - x > 8 ||
+                y - start_y_ > 8 || start_y_ - y > 8;
+            last_x_ = x;
+            last_y_ = y;
+            return true;
+        }
+        if (action != INPUT_ACTION_TOUCH_UP) {
+            return false;
+        }
+        moved_ = moved_ || x - start_x_ > 8 || start_x_ - x > 8 ||
+            y - start_y_ > 8 || start_y_ - y > 8;
+        last_x_ = x;
+        last_y_ = y;
+        active_ = false;
+
+        int elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - started_at_).count());
+        if (elapsedMs < 30) {
+            elapsedMs = 30;
+        } else if (elapsedMs > 600) {
+            elapsedMs = 600;
+        }
+        return runUinput(moved_, elapsedMs);
+    }
+
+private:
+    bool runUinput(bool isSwipe, int durationMs) {
+        char startX[16];
+        char startY[16];
+        char endX[16];
+        char endY[16];
+        char duration[16];
+        std::snprintf(startX, sizeof(startX), "%d", start_x_);
+        std::snprintf(startY, sizeof(startY), "%d", start_y_);
+        std::snprintf(endX, sizeof(endX), "%d", last_x_);
+        std::snprintf(endY, sizeof(endY), "%d", last_y_);
+        std::snprintf(duration, sizeof(duration), "%d", durationMs);
+
+        const pid_t child = fork();
+        if (child < 0) {
+            LOG_WARN(LOG_TAG, "Unable to start local uinput process: " + std::string(strerror(errno)));
+            return false;
+        }
+        if (child == 0) {
+            if (isSwipe) {
+                execl("/bin/uinput", "uinput", "-T", "-m", startX, startY, endX, endY, duration,
+                    static_cast<char*>(nullptr));
+            } else {
+                execl("/bin/uinput", "uinput", "-T", "-d", startX, startY, "-u", endX, endY,
+                    static_cast<char*>(nullptr));
+            }
+            _exit(127);
+        }
+        return true;
+    }
+
+    bool active_ = false;
+    bool moved_ = false;
+    int32_t start_x_ = 0;
+    int32_t start_y_ = 0;
+    int32_t last_x_ = 0;
+    int32_t last_y_ = 0;
+    std::chrono::steady_clock::time_point started_at_;
+};
+
 // 网络传输类
 class NetworkStreamer {
 public:
+    using InputCallback = std::function<void(uint32_t action, int32_t x, int32_t y)>;
+
     NetworkStreamer() : server_fd_(-1), client_fd_(-1), last_heartbeat_time_(std::chrono::steady_clock::now()) {
         memset(&client_addr_, 0, sizeof(client_addr_));
     }
@@ -300,7 +401,8 @@ public:
             case PACKET_TYPE_LOG: type_name = "LOG"; break;
             default: type_name = "UNKNOWN"; break;
         }
-        if (packet_type != PACKET_TYPE_HEARTBEAT) {
+        if (packet_type != PACKET_TYPE_HEARTBEAT &&
+            (packet_type != PACKET_TYPE_FRAME || (frame_log_count_++ % 60) == 0)) {
             LOG_INFO(LOG_TAG, "Send packet: type=" + std::string(type_name) + ", size=" + std::to_string(size) + " bytes");
         }
 
@@ -331,7 +433,7 @@ public:
             std::to_string(info.height) + ":" +
             std::to_string(info.fps) + ":" +
             std::to_string(info.bitrate) + ":" +
-            info.codec +  "\n";
+            info.codec + ":input-v1\n";
 
         bool succ = sendData(config_str.c_str(), config_str.length());
         if (succ) {
@@ -367,6 +469,70 @@ public:
         return false;
     }
 
+    void drainControlPackets(const InputCallback& callback) {
+        if (client_fd_ < 0) {
+            return;
+        }
+
+        uint8_t buffer[256];
+        while (true) {
+            const ssize_t received = recv(client_fd_, buffer, sizeof(buffer), MSG_DONTWAIT);
+            if (received > 0) {
+                inbound_buffer_.insert(inbound_buffer_.end(), buffer, buffer + received);
+                continue;
+            }
+            if (received == 0) {
+                disconnectClient();
+            } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                LOG_ERROR(LOG_TAG, "Receive control packet failed: " + std::string(strerror(errno)));
+                disconnectClient();
+            }
+            break;
+        }
+
+        while (inbound_buffer_.size() >= sizeof(VideoPacketHeader)) {
+            uint32_t packetType = 0;
+            uint32_t packetSize = 0;
+            std::memcpy(&packetType, inbound_buffer_.data(), sizeof(packetType));
+            std::memcpy(&packetSize, inbound_buffer_.data() + sizeof(packetType), sizeof(packetSize));
+            packetType = ntohl(packetType);
+            packetSize = ntohl(packetSize);
+            if (packetSize > MAX_CONTROL_PACKET_SIZE) {
+                LOG_ERROR(LOG_TAG, "Invalid inbound packet size: " + std::to_string(packetSize));
+                disconnectClient();
+                return;
+            }
+
+            const size_t totalSize = sizeof(VideoPacketHeader) + packetSize;
+            if (inbound_buffer_.size() < totalSize) {
+                return;
+            }
+
+            const uint8_t* payload = inbound_buffer_.data() + sizeof(VideoPacketHeader);
+            if (packetType == PACKET_TYPE_INPUT && packetSize == INPUT_PACKET_SIZE) {
+                uint32_t action = 0;
+                uint32_t x = 0;
+                uint32_t y = 0;
+                std::memcpy(&action, payload, sizeof(action));
+                std::memcpy(&x, payload + sizeof(action), sizeof(x));
+                std::memcpy(&y, payload + sizeof(action) + sizeof(x), sizeof(y));
+                const uint32_t inputAction = ntohl(action);
+                const int32_t inputX = static_cast<int32_t>(ntohl(x));
+                const int32_t inputY = static_cast<int32_t>(ntohl(y));
+                static uint32_t loggedInputPackets = 0;
+                if (loggedInputPackets++ < 3) {
+                    LOG_INFO(LOG_TAG, "Received stream touch action=" + std::to_string(inputAction) +
+                        " x=" + std::to_string(inputX) + " y=" + std::to_string(inputY));
+                }
+                callback(inputAction, inputX, inputY);
+            } else if (packetType != PACKET_TYPE_HEARTBEAT || packetSize != 0) {
+                LOG_WARN(LOG_TAG, "Ignoring unsupported inbound packet type=" + std::to_string(packetType) +
+                    " size=" + std::to_string(packetSize));
+            }
+            inbound_buffer_.erase(inbound_buffer_.begin(), inbound_buffer_.begin() + totalSize);
+        }
+    }
+
     bool parseConfigAck(char *buffer, size_t size) {
         char *cfg_ack = strstr(buffer, "CONFIG_ACK");
         if (cfg_ack == nullptr) {
@@ -396,6 +562,7 @@ public:
             client_fd_ = -1;
             memset(&client_addr_, 0, sizeof(client_addr_));
         }
+        inbound_buffer_.clear();
         g_client_connected = false;
         LOG_INFO(LOG_TAG, "Client disconnected");
     }
@@ -417,6 +584,8 @@ private:
     int client_fd_;
     struct sockaddr_in client_addr_;
     std::chrono::steady_clock::time_point last_heartbeat_time_;
+    uint64_t frame_log_count_ = 0;
+    std::vector<uint8_t> inbound_buffer_;
 };
 
 // H.264工具函数
@@ -618,6 +787,9 @@ public:
     }
 };
 
+
+
+
 class OHScrcpyServer;
 
 // 流传输上下文（用于管理编码数据发送）
@@ -687,17 +859,45 @@ public:
         return true;
     }
 
+#ifdef OHSCRCPY_USE_CEDARC
+    static void normalizeCedarcCaptureOrientation(ScreenInfo& screenInfo) {
+        // The A333 panel is physically portrait. RenderService may expose a
+        // landscape virtual screen after a rotation, which is not a valid
+        // capture canvas for the Cedarc raw-buffer path.
+        if (screenInfo.width > screenInfo.height) {
+            const int32_t width = screenInfo.width;
+            screenInfo.width = screenInfo.height;
+            screenInfo.height = width;
+        }
+    }
+#endif
+
     void resetVideoOutput(uint64_t displayId, int32_t width, int32_t height) {
         if (displayId != screen_info_.displayid) {
             return;
         }
-        if ((width == screen_info_.width) && (height == screen_info_.height)) {
+
+        ScreenInfo nextScreenInfo = screen_info_;
+        nextScreenInfo.width = width;
+        nextScreenInfo.height = height;
+        nextScreenInfo.fps = DEFAULT_FPS;
+        nextScreenInfo.bitrate = DEFAULT_BITRATE;
+        nextScreenInfo.codec = "h264";
+
+#ifdef OHSCRCPY_USE_CEDARC
+        normalizeCedarcCaptureOrientation(nextScreenInfo);
+        selectCedarcResolution(nextScreenInfo);
+#endif
+
+        if ((nextScreenInfo.width == screen_info_.width) &&
+            (nextScreenInfo.height == screen_info_.height) &&
+            (nextScreenInfo.codec == screen_info_.codec) &&
+            (nextScreenInfo.bitrate == screen_info_.bitrate)) {
             return;
         }
         LOG_INFO(LOG_TAG, "Resolution is changed, reset video output: displayId[" + std::to_string(displayId) + "] resolution[" + std::to_string(width) + "x" + std::to_string(height) + "]");
         stopStreaming();
-        screen_info_.width = width;
-        screen_info_.height = height;
+        screen_info_ = nextScreenInfo;
         initStreaming();
     }
     
@@ -726,6 +926,8 @@ public:
         {1440, 2560, "2K",      6000000},
         {1080, 1920, "1080p",   4000000},
         {720,  1280, "720p",    2000000},
+        // A333 H.264 supports the 800x1280 panel without scaling when captured in landscape.
+        {1280, 800,  "800p",    2000000},
         {480,  854,  "480p",    1000000},
         {360,  640,  "360p",    600000},
         {240,  426,  "240p",    300000},
@@ -852,7 +1054,6 @@ public:
         
         double ratio = (double)newPixels / origPixels;
         int64_t newBitrate = (int64_t)(originalBitrate * ratio);
-        LOG_INFO(LOG_TAG, "  originalBitrate: " + std::to_string(originalBitrate) + ", newBitrate: " + std::to_string(newBitrate));
         
         if (newBitrate < 500000) newBitrate = 500000;
         if (newBitrate > originalBitrate * 2) newBitrate = originalBitrate * 2;
@@ -860,38 +1061,58 @@ public:
         return newBitrate;
     }
     
-    void applyCodecConfig(ScreenInfo& screenInfo, const StandardResolution& res, const std::string& codec) {
-        int32_t bitrate = adjustBitrateByResolution(screenInfo.bitrate, screenInfo.width, screenInfo.height,
-                                                    res.width, res.height);
+void applyCodecConfig(ScreenInfo& screenInfo, const StandardResolution& res,
+                          int64_t origBitrate, int32_t origWidth, int32_t origHeight,
+                          const std::string& codec) {
         screenInfo.width = res.width;
         screenInfo.height = res.height;
         screenInfo.codec = codec;
-        screenInfo.bitrate = bitrate;
+        screenInfo.bitrate = adjustBitrateByResolution(origBitrate, origWidth, origHeight,
+                                                       screenInfo.width, screenInfo.height);
     }
     
     void applyDefaultConfig(ScreenInfo& screenInfo) {
         screenInfo.width = 720;
         screenInfo.height = 1280;
         screenInfo.codec = "h264";
-        screenInfo.bitrate = DEFAULT_BITRATE;
+        screenInfo.bitrate = 2000000;
     }
+
+#ifdef OHSCRCPY_USE_CEDARC
+    void selectCedarcResolution(ScreenInfo& screenInfo) {
+        // The A333 AVC block accepts a maximum coded height of 1088. Keep the
+        // portrait canvas rather than rotating it into a wider virtual screen.
+        const int32_t originalWidth = screenInfo.width;
+        const int32_t originalHeight = screenInfo.height;
+        if (screenInfo.height > 1088) {
+            screenInfo.width = 672;
+            screenInfo.height = 1072;
+            screenInfo.bitrate = adjustBitrateByResolution(screenInfo.bitrate, originalWidth, originalHeight,
+                screenInfo.width, screenInfo.height);
+        }
+        screenInfo.codec = "h264";
+        LOG_INFO(LOG_TAG, "Cedarc raw-buffer config: " + std::to_string(screenInfo.width) + "x" +
+            std::to_string(screenInfo.height));
+    }
+#endif
     
-    bool selectCodecAndResolution(ScreenInfo& screenInfo) {
+    bool selectCodecAndResolution(ScreenInfo& screenInfo, int32_t origWidth, int32_t origHeight,
+                                      int32_t origFps, int64_t origBitrate) {
         bool hasHevc = checkHevcEncoderExists();
         
         if (hasHevc) {
             LOG_INFO(LOG_TAG, "[Step 2] Check if H.265 supports original resolution");
-            if (checkHevcSizeAndFrameRateSupported(screenInfo.width, screenInfo.height, screenInfo.fps)) {
+            if (checkHevcSizeAndFrameRateSupported(origWidth, origHeight, origFps)) {
                 LOG_INFO(LOG_TAG, "  H.265 supports original resolution, using H.265 directly");
                 screenInfo.codec = "h265";
                 return true;
             }
             
             LOG_INFO(LOG_TAG, "[Step 3] Find H.265 supported resolution from standard list");
-            StandardResolution hevcRes = findCodecSupportedResolution("h265", screenInfo.width, screenInfo.height, screenInfo.fps);
+            StandardResolution hevcRes = findCodecSupportedResolution("h265", origWidth, origHeight, origFps);
             if (hevcRes.name != "none") {
                 LOG_INFO(LOG_TAG, "  Found H.265 supported resolution, using H.265");
-                applyCodecConfig(screenInfo, hevcRes, "h265");
+                applyCodecConfig(screenInfo, hevcRes, origBitrate, origWidth, origHeight, "h265");
                 return true;
             }
             
@@ -900,10 +1121,10 @@ public:
             LOG_INFO(LOG_TAG, "[Step 2] No H.265 encoder, using H.264");
         }
         
-        StandardResolution avcRes = findCodecSupportedResolution("h264", screenInfo.width, screenInfo.height, screenInfo.fps);
+        StandardResolution avcRes = findCodecSupportedResolution("h264", origWidth, origHeight, origFps);
         if (avcRes.name != "none") {
             LOG_INFO(LOG_TAG, "  Found H.264 supported resolution, using H.264");
-            applyCodecConfig(screenInfo, avcRes, "h264");
+            applyCodecConfig(screenInfo, avcRes, origBitrate, origWidth, origHeight, "h264");
             return true;
         }
         
@@ -920,19 +1141,23 @@ private:
             return false;
         }
 
-        printScreenDetailsInfo();
         ScreenInfo screenInfo;
         if (!getPrimaryScreenInfo(screenInfo)) {
             LOG_ERROR(LOG_TAG, "Get primary screen info fail");
             return false;
         }
         
-		selectCodecAndResolution(screenInfo);
+#ifdef OHSCRCPY_USE_CEDARC
+        selectCedarcResolution(screenInfo);
+#else
+		selectCodecAndResolution(screenInfo, screenInfo.width, screenInfo.height,
+                                 screenInfo.fps, screenInfo.bitrate);
+#endif
+
         screen_info_ = screenInfo;
         LOG_INFO(LOG_TAG, "------------------------------------------------------");
         LOG_INFO(LOG_TAG, "Final config: " + std::to_string(screen_info_.width) + "x" + std::to_string(screen_info_.height) + "@" + std::to_string(screen_info_.fps) + "fps, codec=" + screen_info_.codec + ", bitrate=" + std::to_string(screen_info_.bitrate) + "bps");
 		LOG_INFO(LOG_TAG, "------------------------------------------------------");
-        encoder_.printVideoCodecCapability(screenInfo.codec, screenInfo.width, screenInfo.height);
         return true;
     }
 
@@ -945,6 +1170,9 @@ private:
         
         info.width = display->GetWidth();
         info.height = display->GetHeight();
+#ifdef OHSCRCPY_USE_CEDARC
+        normalizeCedarcCaptureOrientation(info);
+#endif
         info.fps = DEFAULT_FPS;
         info.bitrate = DEFAULT_BITRATE;
         info.codec = "h264";
@@ -1014,12 +1242,29 @@ private:
         });
         
         CaptureConfig captureConfig;
+#ifdef OHSCRCPY_USE_CEDARC
+        // The A333 encoder accepts a 672x1072 AVC output, but ScreenCapture
+        // interprets its dimensions as a crop canvas. Capture the complete
+        // primary display and let Cedarc scale it to screen_info_ instead.
+        ScreenInfo captureInfo;
+        if (!getPrimaryScreenInfo(captureInfo)) {
+            LOG_ERROR(LOG_TAG, "Get primary screen info for capture failed");
+            encoder_.Destroy();
+            return false;
+        }
+        captureConfig.width = captureInfo.width;
+        captureConfig.height = captureInfo.height;
+        captureConfig.fps = captureInfo.fps;
+        captureConfig.displayId = captureInfo.displayid;
+        LOG_INFO(LOG_TAG, "Cedarc capture source: " + std::to_string(captureConfig.width) + "x" +
+            std::to_string(captureConfig.height) + "; encoded stream: " +
+            std::to_string(screen_info_.width) + "x" + std::to_string(screen_info_.height));
+#else
         captureConfig.width = screen_info_.width;
         captureConfig.height = screen_info_.height;
         captureConfig.fps = screen_info_.fps;
         captureConfig.displayId = screen_info_.displayid;
-        captureConfig.bitrate = screen_info_.bitrate;
-        captureConfig.codec = screen_info_.codec;
+#endif
         
         ret = capturer_.Create();
         if (ret != ErrorCode::SUCCESS) {
@@ -1035,6 +1280,12 @@ private:
             capturer_.Destroy();
             return false;
         }
+
+#ifdef OHSCRCPY_USE_CEDARC
+        capturer_.SetVideoFrameCallback([this](const CapturedFrame &frame) {
+            encoder_.QueueInputFrame(frame);
+        });
+#endif
         
         ret = encoder_.Start();
         if (ret != ErrorCode::SUCCESS) {
@@ -1044,6 +1295,16 @@ private:
             return false;
         }
         
+#ifdef OHSCRCPY_USE_CEDARC
+        ret = capturer_.Start();
+        if (ret != ErrorCode::SUCCESS) {
+            LOG_ERROR(LOG_TAG, "Start screen capture in raw-buffer mode failed");
+            encoder_.Stop();
+            encoder_.Destroy();
+            capturer_.Destroy();
+            return false;
+        }
+#else
         OHNativeWindow* surface = encoder_.GetSurface();
         if (!surface) {
             LOG_ERROR(LOG_TAG, "Get encoder surface failed");
@@ -1052,7 +1313,6 @@ private:
             capturer_.Destroy();
             return false;
         }
-        
         ret = capturer_.StartWithSurface(surface);
         if (ret != ErrorCode::SUCCESS) {
             LOG_ERROR(LOG_TAG, "Start screen capture with surface failed");
@@ -1061,6 +1321,7 @@ private:
             capturer_.Destroy();
             return false;
         }
+#endif
         
         DisplayManager::GetInstance().RegisterDisplayListener(display_listener_);
         
@@ -1162,6 +1423,16 @@ private:
             }
         }
     }
+
+    void injectTouchEvent(uint32_t action, int32_t x, int32_t y) {
+        if (action < INPUT_ACTION_TOUCH_DOWN || action > INPUT_ACTION_TOUCH_UP ||
+            x < 0 || y < 0 || x > 16384 || y > 16384) {
+            LOG_WARN(LOG_TAG, "Rejecting invalid touch input packet");
+            return;
+        }
+
+        input_injector_.inject(action, x, y);
+    }
     
     void mainLoop() {
         LOG_INFO(LOG_TAG, "Entering main loop...");
@@ -1235,6 +1506,9 @@ private:
             
             // 5. 握手完成且流已初始化，进入正常数据传输
             if (handshake_completed && g_streaming) {
+                network_.drainControlPackets([this](uint32_t action, int32_t x, int32_t y) {
+                    injectTouchEvent(action, x, y);
+                });
                 static uint64_t last_frame_count = 0;
                 uint64_t frame_count = stream_context_->frame_count.load();
                 now = std::chrono::steady_clock::now();
@@ -1262,8 +1536,13 @@ private:
     int port_;
     ScreenInfo screen_info_;
     NetworkStreamer network_;
+    UinputTouchInjector input_injector_;
     CaptureWrapper capturer_;
+#ifdef OHSCRCPY_USE_CEDARC
+    CedarcEncoder encoder_;
+#else
     CodecWrapper encoder_;
+#endif
     std::unique_ptr<StreamContext> stream_context_;
     sptr<DisplayManager::IDisplayListener> display_listener_;
 };

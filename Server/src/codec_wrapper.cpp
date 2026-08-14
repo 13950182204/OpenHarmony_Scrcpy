@@ -18,14 +18,8 @@
 #include "logger.h"
 
 #include <cstring>
-#include <iostream>
-
-#include <native_avcodec_videoencoder.h>
-#include <native_avcodec_base.h>
-#include <native_avformat.h>
-#include <native_avbuffer.h>
-#include <native_avcapability.h>
-#include <native_buffer.h>
+#include <external_window.h>
+#include <surface_type.h>
 
 const std::string LOG_TAG = "Codec";
 
@@ -35,8 +29,7 @@ CodecWrapper::CodecWrapper()
     : encoder_(nullptr)
     , surface_(nullptr)
     , is_created_(false)
-    , is_started_(false)
-    , is_first_frame_(true) {
+    , is_started_(false) {
 }
 
 CodecWrapper::~CodecWrapper() {
@@ -112,7 +105,7 @@ ErrorCode CodecWrapper::Create(const CodecConfig& config) {
     }
     
     OH_AVFormat_Destroy(format);
-    
+
     ret = OH_VideoEncoder_GetSurface(encoder_, &surface_);
     if (ret != 0) {
         LOG_ERROR(LOG_TAG, "OH_VideoEncoder_GetSurface fail, err: " + std::to_string(ret));
@@ -120,7 +113,23 @@ ErrorCode CodecWrapper::Create(const CodecConfig& config) {
         encoder_ = nullptr;
         return ErrorCode::ENCODER_GET_SURFACE_FAILED;
     }
-    
+    ret = OH_NativeWindow_NativeWindowHandleOpt(surface_, SET_FORMAT, OHOS::GRAPHIC_PIXEL_FMT_RGBA_8888);
+    if (ret != 0) {
+        LOG_ERROR(LOG_TAG, "SET_FORMAT RGBA_8888 fail, err: " + std::to_string(ret));
+        OH_VideoEncoder_Destroy(encoder_);
+        encoder_ = nullptr;
+        surface_ = nullptr;
+        return ErrorCode::ENCODER_GET_SURFACE_FAILED;
+    }
+    ret = OH_NativeWindow_NativeWindowHandleOpt(surface_, SET_BUFFER_GEOMETRY, config.width, config.height);
+    if (ret != 0) {
+        LOG_ERROR(LOG_TAG, "SET_BUFFER_GEOMETRY fail, err: " + std::to_string(ret));
+        OH_VideoEncoder_Destroy(encoder_);
+        encoder_ = nullptr;
+        surface_ = nullptr;
+        return ErrorCode::ENCODER_GET_SURFACE_FAILED;
+    }
+
     ret = OH_VideoEncoder_Prepare(encoder_);
     if (ret != 0) {
         LOG_ERROR(LOG_TAG, "OH_VideoEncoder_Prepare fail, err: " + std::to_string(ret));
@@ -130,7 +139,7 @@ ErrorCode CodecWrapper::Create(const CodecConfig& config) {
     }
     
     is_created_ = true;
-    LOG_INFO(LOG_TAG, "VideoEncoder initialized successfully for codec: " + config.codec);
+    LOG_INFO(LOG_TAG, "VideoEncoder initialized with RGBA surface input for codec: " + config.codec);
     return ErrorCode::SUCCESS;
 }
 
@@ -151,7 +160,6 @@ ErrorCode CodecWrapper::Start() {
     }
     
     is_started_ = true;
-    is_first_frame_ = true;
     LOG_INFO(LOG_TAG, "VideoEncoder started");
     return ErrorCode::SUCCESS;
 }
@@ -169,9 +177,30 @@ ErrorCode CodecWrapper::Stop() {
     }
     
     is_started_ = false;
-    is_first_frame_ = true;
+    std::lock_guard<std::mutex> lock(input_mutex_);
+    pending_frames_.clear();
+    available_input_buffers_.clear();
     LOG_INFO(LOG_TAG, "VideoEncoder stopped");
     return ErrorCode::SUCCESS;
+}
+
+void CodecWrapper::QueueInputFrame(const uint8_t* data, size_t size, int64_t timestamp) {
+    if (!is_started_ || data == nullptr || size == 0) return;
+    PendingFrame frame {{data, data + size}, timestamp};
+    AvailableInputBuffer input {};
+    bool hasInputBuffer = false;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        if (!available_input_buffers_.empty()) {
+            input = available_input_buffers_.front();
+            available_input_buffers_.pop_front();
+            hasInputBuffer = true;
+        } else {
+            if (pending_frames_.size() == 2) pending_frames_.pop_front();
+            pending_frames_.push_back(std::move(frame));
+        }
+    }
+    if (hasInputBuffer) SubmitInputBuffer(input.index, input.buffer, frame.data, frame.timestamp);
 }
 
 ErrorCode CodecWrapper::Destroy() {
@@ -187,13 +216,6 @@ ErrorCode CodecWrapper::Destroy() {
     
     is_created_ = false;
     return ErrorCode::SUCCESS;
-}
-
-bool CodecWrapper::IsFirstFrame() const {
-    return is_first_frame_;
-}
-void CodecWrapper::ClearIsFirstFrame() {
-    is_first_frame_ = false;
 }
 
 OHNativeWindow* CodecWrapper::GetSurface() {
@@ -223,38 +245,13 @@ void CodecWrapper::OnStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void*
 }
 
 void CodecWrapper::OnNeedInputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData) {
-    CodecWrapper* self = static_cast<CodecWrapper*>(userData);
-    if (self) {
-        // 获取视频宽跨距、高跨距
-        if (self->IsFirstFrame()) {
-            auto format = std::shared_ptr<OH_AVFormat>(OH_VideoEncoder_GetInputDescription(codec), OH_AVFormat_Destroy);
-            if (format != nullptr) {
-                int32_t widthStride = 0;
-                int32_t heightStride = 0;
-                OH_AVFormat_GetIntValue(format.get(), OH_MD_KEY_VIDEO_STRIDE, &widthStride);
-                OH_AVFormat_GetIntValue(format.get(), OH_MD_KEY_VIDEO_SLICE_HEIGHT, &heightStride);
-                LOG_INFO(LOG_TAG, "VideoEncoder Input stride info: " + std::to_string(widthStride) + ", " + std::to_string(heightStride));
-            }
-            self->ClearIsFirstFrame();
-        }
-    }
+    auto* self = static_cast<CodecWrapper*>(userData);
+    if (self != nullptr) self->HandleInputBuffer(index, buffer);
 }
 
 void CodecWrapper::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData) {
     CodecWrapper* self = static_cast<CodecWrapper*>(userData);
     if (self) {
-        // 获取视频宽跨距、高跨距
-        if (self->IsFirstFrame()) {
-            auto format = std::shared_ptr<OH_AVFormat>(OH_VideoEncoder_GetOutputDescription(codec), OH_AVFormat_Destroy);
-            if (format != nullptr) {
-                int32_t widthStride = 0;
-                int32_t heightStride = 0;
-                OH_AVFormat_GetIntValue(format.get(), OH_MD_KEY_VIDEO_STRIDE, &widthStride);
-                OH_AVFormat_GetIntValue(format.get(), OH_MD_KEY_VIDEO_SLICE_HEIGHT, &heightStride);
-                LOG_INFO(LOG_TAG, "VideoEncoder Output stride info: " + std::to_string(widthStride) + ", " + std::to_string(heightStride));
-            }
-            self->ClearIsFirstFrame();
-        }
         self->HandleOutputBuffer(index, buffer);
         OH_VideoEncoder_FreeOutputBuffer(codec, index);
     }
@@ -270,6 +267,43 @@ void CodecWrapper::HandleStreamChanged(OH_AVFormat* format) {
     OH_AVFormat_GetIntValue(format, OH_MD_KEY_HEIGHT, &height);
     LOG_INFO(LOG_TAG, "VideoEncoder stream changed: " + std::to_string(width) + "x" + std::to_string(height));
 }
+
+void CodecWrapper::HandleInputBuffer(uint32_t index, OH_AVBuffer* buffer) {
+    if (!is_started_ || buffer == nullptr) return;
+    PendingFrame frame;
+    bool hasFrame = false;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        if (!pending_frames_.empty()) {
+            frame = std::move(pending_frames_.front());
+            pending_frames_.pop_front();
+            hasFrame = true;
+        } else {
+            available_input_buffers_.push_back({index, buffer});
+        }
+    }
+    if (hasFrame) SubmitInputBuffer(index, buffer, frame.data, frame.timestamp);
+}
+
+void CodecWrapper::SubmitInputBuffer(uint32_t index, OH_AVBuffer* buffer, const std::vector<uint8_t>& data,
+    int64_t timestamp) {
+    int32_t capacity = buffer == nullptr ? -1 : OH_AVBuffer_GetCapacity(buffer);
+    if (capacity < 0 || data.size() > static_cast<size_t>(capacity)) {
+        LOG_ERROR(LOG_TAG, "Encoder input buffer is smaller than captured RGBA frame");
+        return;
+    }
+    uint8_t* target = OH_AVBuffer_GetAddr(buffer);
+    if (target == nullptr) return;
+    std::memcpy(target, data.data(), data.size());
+    OH_AVCodecBufferAttr attr = {};
+    attr.pts = timestamp;
+    attr.size = static_cast<int32_t>(data.size());
+    attr.flags = AVCODEC_BUFFER_FLAGS_NONE;
+    int32_t ret = OH_AVBuffer_SetBufferAttr(buffer, &attr);
+    if (ret == 0) ret = OH_VideoEncoder_PushInputBuffer(encoder_, index);
+    if (ret != 0) LOG_ERROR(LOG_TAG, "Submit encoder input buffer fail, err: " + std::to_string(ret));
+}
+
 
 void CodecWrapper::HandleOutputBuffer(uint32_t index, OH_AVBuffer* buffer) {
     if (!buffer || !output_callback_) {
@@ -296,9 +330,10 @@ void CodecWrapper::HandleOutputBuffer(uint32_t index, OH_AVBuffer* buffer) {
     
     bool isKeyframe = (info.flags & AVCODEC_BUFFER_FLAGS_SYNC_FRAME) != 0;
     
-    if (info.size > 0) {
-        ParseParameterSets(addr, info.size);
-        output_callback_(addr, info.size, isKeyframe);
+    if (info.size > 0 && info.offset >= 0) {
+        uint8_t* payload = addr + info.offset;
+        ParseParameterSets(payload, info.size);
+        output_callback_(payload, info.size, isKeyframe);
     }
 }
 
@@ -387,137 +422,4 @@ void CodecWrapper::ParseParameterSets(uint8_t* data, size_t size) {
     }
 }
 
-void CodecWrapper::printVideoCodecCapability(const std::string &codec, int32_t width, int32_t height) {
-    const char *codecName = nullptr;
-    const char *codecTitle = nullptr;
-    int32_t profile = -1;
-    if (codec == "h265") {
-        codecName = OH_AVCODEC_MIMETYPE_VIDEO_HEVC;
-        codecTitle = "HEVC(H.265)";
-        profile = OH_HEVCProfile::HEVC_PROFILE_MAIN;
-    } else if (codec == "h264") {
-        codecName = OH_AVCODEC_MIMETYPE_VIDEO_AVC;
-        codecTitle = "AVC(H.264)";
-        profile = OH_AVCProfile::AVC_PROFILE_MAIN;
-    } else {
-        std::cerr << "Unsupported video codec name: " << codec << std::endl;
-        return;
-    }
-
-    std::cout << "------------------------------------------------------" << std::endl;
-    std::cout << codecTitle << " Video Codec Capability Info: " << std::endl;
-    OH_AVCapability *capability = OH_AVCodec_GetCapabilityByCategory(codecName, true, HARDWARE);
-    if (capability == nullptr) {
-        std::cerr << "OH_AVCodec_GetCapabilityByCategory fail" << std::endl;
-        return;
-    }
-    // 获取编码器名称
-    codecName = OH_AVCapability_GetName(capability);
-    std::cout << "  CodecName: " << codecName << std::endl;
-
-    bool isSupported = OH_AVCapability_IsEncoderBitrateModeSupported(capability, BITRATE_MODE_CBR);
-    bool isSupported2 = OH_AVCapability_IsEncoderBitrateModeSupported(capability, BITRATE_MODE_VBR);
-    bool isSupported3 = OH_AVCapability_IsEncoderBitrateModeSupported(capability, BITRATE_MODE_CQ);
-    std::cout << "  BitRateModeSupported: CBR[" << isSupported << "], VBR[" << isSupported2 << "], CQ[" 
-                << isSupported3 << "]" << std::endl;
-
-    // 获取码率范围
-    OH_AVRange bitrateRange = {-1, -1};
-    int32_t ret = OH_AVCapability_GetEncoderBitrateRange(capability, &bitrateRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  BitRateRange: [" << bitrateRange.minVal << "~" << bitrateRange.maxVal << "]";
-    }
-    // 获取CQ模式下的质量范围
-    OH_AVRange qualityRange = {-1, -1};
-    ret = OH_AVCapability_GetEncoderQualityRange(capability, &qualityRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << ", QualityRange: [" << qualityRange.minVal << "~" << qualityRange.maxVal << "]" << std::endl;
-    }
-
-    // 获取profile范围
-    const int32_t *profiles = nullptr;
-    uint32_t profileNum = 0;
-    ret = OH_AVCapability_GetSupportedProfiles(capability, &profiles, &profileNum);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  SupportedProfiles: [";
-        for (uint32_t i = 0; i < profileNum; i++) {
-            std::cout << profiles[i];
-            if (i < profileNum - 1) std::cout << ",";
-        }
-        std::cout << "]" << std::endl;
-    }
-
-    // 获取PROFILE_MAIN对应的Level范围
-    const int32_t *levels = nullptr;
-    uint32_t levelNum = 0;
-    ret = OH_AVCapability_GetSupportedLevelsForProfile(capability, profile, &levels, &levelNum);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  SupportedLevelsForProfile " << profile << "(main): [";
-        for (uint32_t i = 1; i < levelNum; i++) {
-            std::cout << levels[i];
-            if (i < levelNum - 1) std::cout << ",";
-        }
-        std::cout << "]" << std::endl;
-    }
-
-    // 获取支持的宽范围
-    OH_AVRange widthRange = {-1, -1};
-    ret = OH_AVCapability_GetVideoWidthRange(capability, &widthRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  WidthRange: [" << widthRange.minVal << "," << widthRange.maxVal << "]";
-    }
-    // 获取支持的高范围
-    OH_AVRange heightRange = {-1, -1};
-    ret = OH_AVCapability_GetVideoHeightRange(capability, &heightRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << ", HeightRange: [" << heightRange.minVal << "," << heightRange.maxVal << "]";
-    }
-    // 获取支持的帧率范围
-    OH_AVRange frameRateRange = {-1, -1};
-    ret = OH_AVCapability_GetVideoFrameRateRange(capability, &frameRateRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << ", FrameRateRange: [" << frameRateRange.minVal << "," << frameRateRange.maxVal << "]" << std::endl;
-    }
-
-    // 获取宽对齐要求
-    int32_t widthAlignment = 0;
-    ret = OH_AVCapability_GetVideoWidthAlignment(capability, &widthAlignment);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  WidthAlignment: " << widthAlignment;
-    }
-    // 获取高对齐要求
-    int32_t heightAlignment = 0;
-    ret = OH_AVCapability_GetVideoHeightAlignment(capability, &heightAlignment);
-    if (ret == AV_ERR_OK) {
-        std::cout << ", HeightAlignment: " << heightAlignment << std::endl;
-    }
-
-    // 获取支持的像素格式
-    const int32_t *pixFormats = nullptr;
-    uint32_t pixFormatNum = 0;
-    ret = OH_AVCapability_GetVideoSupportedPixelFormats(capability, &pixFormats, &pixFormatNum);
-    if (ret == AV_ERR_OK) {
-        std::cout << "  SupportedPixelFormats: [";
-        for (uint32_t i = 1; i < pixFormatNum; i++) {
-            std::cout << pixFormats[i];
-            if (i < pixFormatNum - 1) std::cout << ",";
-        }
-        std::cout << "]" << std::endl;
-    }
-    // 获取是否支持低时延特性
-    isSupported = OH_AVCapability_IsFeatureSupported(capability, VIDEO_LOW_LATENCY);
-    std::cout << "  IsFeatureSupported VIDEO_LOW_LATENCY: " << isSupported << std::endl;
-
-    // 获取指定视频宽高是否支持
-    isSupported = OH_AVCapability_IsVideoSizeSupported(capability, width, height);
-    std::cout << "  [" << width << "*" << height << "] IsVideoSizeSupported: " << isSupported;
-    // 获取指定视频尺寸支持的帧率范围
-    frameRateRange = {-1, -1};
-    ret = OH_AVCapability_GetVideoFrameRateRangeForSize(capability, width, height, &frameRateRange);
-    if (ret == AV_ERR_OK) {
-        std::cout << ", FrameRateRange: [" << frameRateRange.minVal << "," << frameRateRange.maxVal << "]" << std::endl;
-    }
-
-    std::cout << "------------------------------------------------------" << std::endl;
-}
 } // namespace OHScrcpy
