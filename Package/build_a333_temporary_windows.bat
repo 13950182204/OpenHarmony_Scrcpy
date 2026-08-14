@@ -5,7 +5,7 @@ chcp 65001 >nul
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%.."
 set "STAGING_DIR=%SCRIPT_DIR%A333_Temporary_Staging"
-set "RELEASE_DIR=%PROJECT_ROOT%\Release\OHScrcpy-A333-Temporary-LandscapeTouchFix"
+set "RELEASE_DIR=%PROJECT_ROOT%\Release\OHScrcpy-A333-Temporary-NoFrameCounter"
 set "MODE_MARKER=a333_temporary_mode.flag"
 
 echo [INFO] Building the all-device A333 temporary Windows release.
