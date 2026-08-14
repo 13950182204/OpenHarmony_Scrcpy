@@ -19,10 +19,12 @@ OpenHarmony_Scrcpy 常量与枚举定义
 
 from enum import IntEnum, auto
 
+from .runtime_mode import is_a333_temporary_mode
+
 # ==================== 项目信息 ====================
 AUTHOR = "luodh0157"
-PROJECT_URL = "https://gitcode.com/luodh0157/OpenHarmony_Scrcpy"
-VERSION = "v2.3.0"
+PROJECT_URL = "https://gitcode.com/OpenHarmony_Tools/OpenHarmony_Scrcpy"
+VERSION = "v2.3.2-a333-temp" if is_a333_temporary_mode() else "v2.3.2-a333"
 
 # ==================== 网络配置 ====================
 DEFAULT_PORT = 27183

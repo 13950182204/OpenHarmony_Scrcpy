@@ -18,11 +18,13 @@ OpenHarmony_Scrcpy 设备管理器
 """
 
 from dataclasses import dataclass
+import re
 from typing import Optional, List
 
 from .constants import DEFAULT_PORT, LogLevel
 from .logger import print_log
 from .hdc_executor import HDCCommandExecutor
+from .runtime_mode import is_a333_temporary_mode
 
 
 @dataclass
@@ -121,9 +123,25 @@ class DeviceManager:
             return -1
         
         output_result = result["stdout"]
-        port = DEFAULT_PORT
+        # The A333 runtime server must stay off DEFAULT_PORT because an
+        # init-managed legacy service can reclaim that port mid-session.
+        uses_a333_runtime = (
+            is_a333_temporary_mode()
+            or self.current_device.manufacturer == "Dnakeiot"
+        )
+        port = DEFAULT_PORT + 1 if uses_a333_runtime else DEFAULT_PORT
+        device_listening = ""
+        if uses_a333_runtime:
+            device_result = self.hdc.execute(["shell", "netstat", "-an"])
+            if device_result.get("success"):
+                device_listening = device_result.get("stdout", "")
+            else:
+                print_log(LogLevel.WARN, self.log_title, "无法查询设备监听端口，仅检查 HDC 转发")
+
         while port < 65535:
-            if not str(port) in output_result:
+            forwarded = re.search(rf"\btcp:{port}\b", output_result)
+            listening = re.search(rf":{port}(?:\s|$).*\bLISTEN\b", device_listening)
+            if not forwarded and not listening:
                 self.port_forwarding = port
                 print_log(LogLevel.INFO, self.log_title, f"获取到可用转发端口: {port}")
                 return port

@@ -122,3 +122,37 @@ class TestDeviceManager:
         
         manager.reset_port_forwarding()
         assert manager.port_forwarding == -1
+
+    def test_dnakeiot_uses_port_after_init_managed_default(self):
+        hdc = Mock()
+        hdc.execute.side_effect = [
+            {"success": True, "stdout": ""},
+            {"success": True, "stdout": ""},
+        ]
+        manager = DeviceManager(hdc)
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot")
+
+        assert manager.get_port_forwarding() == 27184
+
+    def test_dnakeiot_skips_device_listener(self):
+        hdc = Mock()
+        hdc.execute.side_effect = [
+            {"success": True, "stdout": ""},
+            {"success": True, "stdout": "tcp 0 0 0.0.0.0:27184 0.0.0.0:* LISTEN"},
+        ]
+        manager = DeviceManager(hdc)
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot")
+
+        assert manager.get_port_forwarding() == 27185
+
+    @patch("core.device_manager.is_a333_temporary_mode", return_value=True)
+    def test_temporary_a333_mode_uses_runtime_port_for_default_device(self, _temporary_mode):
+        hdc = Mock()
+        hdc.execute.side_effect = [
+            {"success": True, "stdout": ""},
+            {"success": True, "stdout": ""},
+        ]
+        manager = DeviceManager(hdc)
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="default")
+
+        assert manager.get_port_forwarding() == 27184

@@ -19,6 +19,8 @@
 
 import pytest
 import os
+import hashlib
+import json
 from unittest.mock import Mock, patch, MagicMock
 
 from core.server_manager import ServerManager
@@ -58,12 +60,14 @@ class TestServerManager:
     
     def test_is_installed_true(self, server_manager, mock_hdc):
         """测试已安装状态"""
+        server_manager._validate_local_server_resource = Mock(return_value=True)
         mock_hdc.check_file_exists = Mock(return_value=True)
         result = server_manager.check_server_installed()
         assert result == True
 
     def test_is_installed_false(self, server_manager, mock_hdc):
         """测试未安装状态"""
+        server_manager._validate_local_server_resource = Mock(return_value=True)
         mock_hdc.check_file_exists = Mock(return_value=False)
         result = server_manager.check_server_installed()
         assert result == False
@@ -86,11 +90,72 @@ class TestServerManager:
         server_manager.stop_server()
         mock_hdc.execute.assert_called()
 
+    def test_stop_device_service_uses_init_control(self, server_manager, mock_hdc):
+        server_manager._stop_device_service()
+        calls = [call.args[0] for call in mock_hdc.execute.call_args_list]
+        assert ["shell", "param", "set", "ctl.stop", "ohscrcpy_server"] in calls
+        assert ["shell", "pkill", "-f", "ohscrcpy_server"] in calls
+
     def test_get_server_state(self, server_manager):
         """测试获取服务状态"""
         assert hasattr(server_manager, 'check_server_installed')
         assert hasattr(server_manager, 'check_server_running')
         assert hasattr(server_manager, 'stop_server')
+
+    def test_dnakeiot_resource_requires_matching_aarch64_manifest(self, mock_hdc, tmp_path):
+        resource_dir = tmp_path / "Dnakeiot"
+        resource_dir.mkdir()
+        server_path = resource_dir / "ohscrcpy_server"
+        cfg_path = resource_dir / "ohscrcpy_server.cfg"
+        server_path.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 11 + (183).to_bytes(2, "little"))
+        cfg_path.write_text("{}", encoding="utf-8")
+        manifest = {
+            "target_abi": "aarch64",
+            "sha256": hashlib.sha256(server_path.read_bytes()).hexdigest(),
+            "config_sha256": hashlib.sha256(cfg_path.read_bytes()).hexdigest(),
+        }
+        (resource_dir / "server_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        manager = ServerManager(manufacturer="Dnakeiot", hdc_executor=mock_hdc)
+        manager.server_exe_file = str(server_path)
+        manager.server_cfg_file = str(cfg_path)
+
+        assert manager._validate_local_server_resource() is True
+
+    def test_installed_server_hash_mismatch_requires_reinstall(self, server_manager, mock_hdc, tmp_path):
+        server_path = tmp_path / "ohscrcpy_server"
+        cfg_path = tmp_path / "ohscrcpy_server.cfg"
+        server_path.write_bytes(b"server")
+        cfg_path.write_text("{}", encoding="utf-8")
+        manifest = {
+            "sha256": hashlib.sha256(server_path.read_bytes()).hexdigest(),
+            "config_sha256": hashlib.sha256(cfg_path.read_bytes()).hexdigest(),
+        }
+        (tmp_path / "server_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        server_manager.server_exe_file = str(server_path)
+        server_manager.server_cfg_file = str(cfg_path)
+        mock_hdc.check_file_exists = Mock(return_value=True)
+        mock_hdc.execute.return_value = {
+            "success": True,
+            "stdout": "0" * 64 + "  /system/bin/ohscrcpy_server",
+            "stderr": "",
+        }
+
+        assert server_manager.check_server_installed() is False
+
+    def test_runtime_deployment_uses_data_partition(self, server_manager):
+        assert server_manager.remote_server_path == "/data/local/tmp/ohscrcpy_server"
+        assert server_manager.remote_config_path == "/data/local/tmp/ohscrcpy_server.cfg"
+
+    def test_start_server_replaces_other_listener_with_runtime_server(self, server_manager, mock_hdc):
+        server_manager.manufacturer = "Dnakeiot"
+        server_manager._is_runtime_server_running = Mock(return_value=False)
+        server_manager.prepare_server = Mock(return_value=True)
+        server_manager._is_runtime_server_running = Mock(side_effect=[False, True])
+        mock_hdc.execute_async_in_shell.return_value = Mock()
+
+        assert server_manager.start_server(27183) is True
+        mock_hdc.execute_async_in_shell.assert_called_once()
 
 
 class TestServerManagerResourcePath:
@@ -141,3 +206,26 @@ class TestServerManufacturerHandling:
         with patch.object(ServerManager, '_get_resource_path', return_value='/mock/HUAWEI/server'):
             manager = ServerManager(manufacturer="HUAWEI", hdc_executor=mock_hdc)
             assert manager.manufacturer == "HUAWEI"
+
+    def test_dnakeiot_source_resource_path(self, mock_hdc, tmp_path):
+        client_dir = tmp_path / "Client"
+        core_dir = client_dir / "core"
+        source_dir = tmp_path / "Server" / "bin" / "Dnakeiot"
+        core_dir.mkdir(parents=True)
+        source_dir.mkdir(parents=True)
+        resource = source_dir / "ohscrcpy_server"
+        resource.write_bytes(b"server")
+
+        with patch('os.path.abspath', return_value=str(core_dir / "server_manager.py")):
+            manager = ServerManager(manufacturer="Dnakeiot", hdc_executor=mock_hdc)
+
+        assert manager.server_exe_file == str(resource)
+
+    @patch("core.server_manager.get_runtime_resource_profile", return_value="Dnakeiot")
+    def test_temporary_a333_mode_uses_dnakeiot_resource_for_default_device(
+            self, _resource_profile, mock_hdc):
+        with patch.object(ServerManager, "_get_resource_path", return_value="/mock/Dnakeiot/server"):
+            manager = ServerManager(manufacturer="default", hdc_executor=mock_hdc)
+
+        assert manager.manufacturer == "default"
+        assert manager.resource_profile == "Dnakeiot"

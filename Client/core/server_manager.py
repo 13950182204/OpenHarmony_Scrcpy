@@ -21,11 +21,18 @@ import sys
 import os
 import time
 import subprocess
+import hashlib
+import json
+import re
+import threading
 from typing import Optional
 
 from .constants import LogLevel
 from .logger import print_log, get_log_file
 from .hdc_executor import HDCCommandExecutor
+from .runtime_mode import get_runtime_resource_profile
+
+_SERVER_OPERATION_LOCK = threading.RLock()
 
 
 class ServerManager:
@@ -36,9 +43,21 @@ class ServerManager:
         self.server_process: Optional[subprocess.Popen] = None
         self.manufacturer = manufacturer
         self.log_title = "服务端管理器"
+        # Runtime deployment is per-device and does not require the system
+        # partition or an init entry. This also works on a clean device.
+        self.remote_server_path = "/data/local/tmp/ohscrcpy_server"
+        self.remote_config_path = "/data/local/tmp/ohscrcpy_server.cfg"
         
-        self.server_exe_file = self._get_resource_path("ohscrcpy_server", manufacturer)
-        self.server_cfg_file = self._get_resource_path("ohscrcpy_server.cfg")
+        self._refresh_resource_paths()
+
+    def _refresh_resource_paths(self) -> None:
+        """Refresh paths after a device or packaged resource profile changes."""
+        self.resource_profile = get_runtime_resource_profile(self.manufacturer)
+        self.server_exe_file = self._get_resource_path("ohscrcpy_server", self.resource_profile)
+        self.server_cfg_file = self._get_resource_path(
+            "ohscrcpy_server.cfg",
+            self.resource_profile if self.resource_profile == "Dnakeiot" else "default",
+        )
     
     def _get_resource_path(self, filename: str, manufacturer: str = "default") -> str:
         """获取资源文件的正确路径（支持PyInstaller打包）"""
@@ -53,8 +72,16 @@ class ServerManager:
             if manufacturer != "default":
                 manu_path = os.path.join(base_path, manufacturer)
                 file_path = os.path.join(manu_path, filename)
-                if os.path.exists(manu_path) and os.path.exists(file_path):
+                if os.path.isfile(file_path):
                     base_path = os.path.join(base_path, manufacturer)
+                elif manufacturer == "Dnakeiot":
+                    source_resource = os.path.join(
+                        os.path.dirname(base_path), "Server", "bin", manufacturer, filename)
+                    if not hasattr(sys, '_MEIPASS') and os.path.isfile(source_resource):
+                        return source_resource
+                    print_log(LogLevel.ERROR, self.log_title,
+                              f"缺少 Dnakeiot AArch64 服务端资源: {file_path}")
+                    return file_path
             
             server_path = os.path.join(base_path, filename)
             print_log(LogLevel.DEBUG, self.log_title, f"待安装服务端可执行文件路径: {server_path}")
@@ -66,46 +93,160 @@ class ServerManager:
     def update_manufacturer(self, manufacturer: str) -> None:
         """更新设备制造商信息"""
         self.manufacturer = manufacturer
-        self.server_exe_file = self._get_resource_path("ohscrcpy_server", manufacturer)
-        self.server_cfg_file = self._get_resource_path("ohscrcpy_server.cfg")
+        self._refresh_resource_paths()
+
+    def _get_server_manifest(self) -> Optional[dict]:
+        manifest_path = os.path.join(os.path.dirname(self.server_exe_file), "server_manifest.json")
+        if not os.path.isfile(manifest_path):
+            return None
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+                manifest = json.load(manifest_file)
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest 根节点不是对象")
+            return manifest
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print_log(LogLevel.ERROR, self.log_title, f"读取服务端 manifest 失败: {exc}")
+            return None
+
+    @staticmethod
+    def _sha256_file(path: str) -> Optional[str]:
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as executable:
+                for block in iter(lambda: executable.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _is_aarch64_elf(path: str) -> bool:
+        try:
+            with open(path, "rb") as executable:
+                header = executable.read(20)
+        except OSError:
+            return False
+
+        return (
+            len(header) >= 20
+            and header[:4] == b"\x7fELF"
+            and header[4] == 2
+            and int.from_bytes(header[18:20], byteorder="little") == 183
+        )
+
+    def _validate_local_server_resource(self) -> bool:
+        if not os.path.isfile(self.server_exe_file):
+            print_log(LogLevel.ERROR, self.log_title, f"服务端资源不存在: {self.server_exe_file}")
+            return False
+
+        manifest = self._get_server_manifest()
+        if manifest is None:
+            if self.resource_profile == "Dnakeiot":
+                print_log(LogLevel.ERROR, self.log_title, "Dnakeiot 服务端缺少 manifest")
+                return False
+            return True
+
+        expected_sha256 = manifest.get("sha256")
+        if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            print_log(LogLevel.ERROR, self.log_title, "服务端 manifest 的 SHA-256 无效")
+            return False
+
+        actual_sha256 = self._sha256_file(self.server_exe_file)
+        if actual_sha256 != expected_sha256:
+            print_log(LogLevel.ERROR, self.log_title,
+                      f"服务端资源 SHA-256 不匹配: expected={expected_sha256}, actual={actual_sha256}")
+            return False
+
+        if manifest.get("target_abi") == "aarch64" and not self._is_aarch64_elf(self.server_exe_file):
+            print_log(LogLevel.ERROR, self.log_title, "服务端资源不是 ELF64/AArch64")
+            return False
+
+        expected_cfg_sha256 = manifest.get("config_sha256")
+        actual_cfg_sha256 = self._sha256_file(self.server_cfg_file)
+        if expected_cfg_sha256 is not None and actual_cfg_sha256 != expected_cfg_sha256:
+            print_log(LogLevel.ERROR, self.log_title,
+                      f"服务配置 SHA-256 不匹配: expected={expected_cfg_sha256}, actual={actual_cfg_sha256}")
+            return False
+
+        return True
+
+    def _get_remote_server_sha256(self) -> Optional[str]:
+        return self._get_remote_sha256(self.remote_server_path)
+
+    def _get_remote_sha256(self, remote_path: str) -> Optional[str]:
+        result = self.hdc.execute(["shell", "sha256sum", remote_path])
+        if not result.get("success"):
+            return None
+
+        output = result.get("stdout", "")
+        match = re.search(r"\b([0-9a-fA-F]{64})\b", output)
+        return match.group(1).lower() if match else None
     
     def install_server(self) -> bool:
         """安装服务端"""
         print_log(LogLevel.INFO, self.log_title, f"开始安装...")
         
-        if not os.path.exists(self.server_exe_file):
-            print_log(LogLevel.FATAL, self.log_title, f"错误: {self.server_exe_file} 文件不存在")
+        if not self._validate_local_server_resource():
             return False
         
         if not os.path.exists(self.server_cfg_file):
             print_log(LogLevel.FATAL, self.log_title, f"错误: {self.server_cfg_file} 文件不存在")
             return False
+
+        # Stop any init-managed or temporary instance before replacement.
+        self._stop_device_service()
         
-        print_log(LogLevel.DEBUG, self.log_title, f"挂载系统为读写模式...")
-        result = self.hdc.execute(["target", "mount"])
-        if not result["success"]:
-            print_log(LogLevel.ERROR, self.log_title, f"挂载失败: {result.get('stderr', '未知错误')}")
-        
-        print_log(LogLevel.DEBUG, self.log_title, f"推送可执行文件...")
-        result = self.hdc.execute(["file", "send", self.server_exe_file, "/system/bin/"])
+        server_tmp = "/data/local/tmp/ohscrcpy_server.package"
+        config_tmp = "/data/local/tmp/ohscrcpy_server.cfg.package"
+
+        print_log(LogLevel.DEBUG, self.log_title, f"推送可执行文件到临时路径...")
+        result = self.hdc.execute(["file", "send", self.server_exe_file, server_tmp])
         if not result["success"]:
             print_log(LogLevel.ERROR, self.log_title, f"推送 ohscrcpy_server 失败: {result.get('stderr', '未知错误')}")
             return False
-        
-        print_log(LogLevel.DEBUG, self.log_title, f"设置可执行权限...")
-        result = self.hdc.execute(["shell", "chmod", "+x", "/system/bin/ohscrcpy_server"])
+
+        print_log(LogLevel.DEBUG, self.log_title, f"替换服务端可执行文件...")
+        result = self.hdc.execute(["shell", "chmod", "+x", server_tmp])
         if not result["success"]:
             print_log(LogLevel.ERROR, self.log_title, f"设置可执行权限失败: {result.get('stderr', '未知错误')}")
             return False
-        
-        print_log(LogLevel.DEBUG, self.log_title, f"推送配置文件...")
-        result = self.hdc.execute(["file", "send", self.server_cfg_file, "/system/etc/init/"])
+        result = self.hdc.execute(["shell", "mv", "-f", server_tmp, self.remote_server_path])
+        if not result["success"]:
+            print_log(LogLevel.ERROR, self.log_title, f"替换 ohscrcpy_server 失败: {result.get('stderr', '未知错误')}")
+            return False
+
+        print_log(LogLevel.DEBUG, self.log_title, f"推送配置文件到临时路径...")
+        result = self.hdc.execute(["file", "send", self.server_cfg_file, config_tmp])
         if not result["success"]:
             print_log(LogLevel.ERROR, self.log_title, f"推送 ohscrcpy_server.cfg 失败: {result.get('stderr', '未知错误')}")
             return False
-        
+
+        result = self.hdc.execute(["shell", "mv", "-f", config_tmp, self.remote_config_path])
+        if not result["success"]:
+            print_log(LogLevel.ERROR, self.log_title, f"替换 ohscrcpy_server.cfg 失败: {result.get('stderr', '未知错误')}")
+            return False
+
+        manifest = self._get_server_manifest()
+        if manifest is not None:
+            remote_sha256 = self._get_remote_server_sha256()
+            remote_cfg_sha256 = self._get_remote_sha256(self.remote_config_path)
+            if remote_sha256 != manifest["sha256"] or remote_cfg_sha256 != manifest.get("config_sha256"):
+                print_log(LogLevel.ERROR, self.log_title,
+                          "部署后设备端哈希仍不匹配: "
+                          f"binary={remote_sha256}, config={remote_cfg_sha256}")
+                return False
+
         print_log(LogLevel.INFO, self.log_title, f"安装完成")
         return True
+
+    def _stop_device_service(self) -> None:
+        """Stop the init-managed service before replacing its executable."""
+        self.hdc.execute(["shell", "param", "set", "ctl.stop", "ohscrcpy_server"])
+        self.hdc.execute(["shell", "pkill", "-f", "ohscrcpy_server"])
+        self.hdc.execute(["shell", "killall", "ohscrcpy_server"])
+        time.sleep(0.2)
 
     def uninstall_server(self) -> bool:
         """卸载服务端"""
@@ -113,11 +254,11 @@ class ServerManager:
         
         self.stop_server()
         
-        result = self.hdc.execute(["shell", "rm", "-f", "/system/bin/ohscrcpy_server"])
+        result = self.hdc.execute(["shell", "rm", "-f", self.remote_server_path])
         if not result["success"]:
             print_log(LogLevel.ERROR, self.log_title, f"删除 ohscrcpy_server 失败: {result.get('stderr', '未知错误')}")
         
-        result = self.hdc.execute(["shell", "rm", "-f", "/system/etc/init/ohscrcpy_server.cfg"])
+        result = self.hdc.execute(["shell", "rm", "-f", self.remote_config_path])
         if not result["success"]:
             print_log(LogLevel.ERROR, self.log_title, f"删除 ohscrcpy_server.cfg 失败: {result.get('stderr', '未知错误')}")
         
@@ -126,11 +267,18 @@ class ServerManager:
     
     def start_server(self, port: int) -> bool:
         """启动服务端"""
+        if self.resource_profile == "Dnakeiot" and self._is_runtime_server_running(port):
+            print_log(LogLevel.INFO, self.log_title, f"运行时服务已监听端口: {port}")
+            return True
+        if self.resource_profile != "Dnakeiot" and self.check_server_running(port=port):
+            print_log(LogLevel.INFO, self.log_title, f"服务已监听端口: {port}")
+            return True
+
         self.prepare_server()
         print_log(LogLevel.INFO, self.log_title, f"开始启动...")
         
         device_sn = self.hdc.get_current_device()
-        cmd_args = ["shell", "/system/bin/ohscrcpy_server", "-p", f"{port}"]
+        cmd_args = ["shell", self.remote_server_path, "-p", f"{port}"]
         
         if get_log_file() is not None:
             cmd_args.append("--log")
@@ -143,7 +291,7 @@ class ServerManager:
             need_print = True
             start_time = time.time()
             while time.time() - start_time < 5.0:
-                if self.check_server_running(need_print):
+                if self._is_runtime_server_running(port):
                     print_log(LogLevel.INFO, self.log_title, f"启动成功")
                     return True
                 need_print = False
@@ -158,6 +306,8 @@ class ServerManager:
     def stop_server(self) -> bool:
         """停止服务端"""
         print_log(LogLevel.INFO, self.log_title, f"开始停止...")
+
+        self._stop_device_service()
         
         if self.server_process:
             try:
@@ -172,29 +322,47 @@ class ServerManager:
             finally:
                 self.server_process = None
         
-        result = self.hdc.execute(["shell", "pkill", "-f", "ohscrcpy_server"])
-        
-        if not result["success"]:
-            result = self.hdc.execute(["shell", "killall", "ohscrcpy_server"])
-        
         self.hdc.stop_async_processes()
         print_log(LogLevel.INFO, self.log_title, f"停止完成")
         return True
     
     def check_server_installed(self) -> bool:
         """检查服务端是否已安装"""
-        executable_exists = self.hdc.check_file_exists("/system/bin/ohscrcpy_server")
-        config_exists = self.hdc.check_file_exists("/system/etc/init/ohscrcpy_server.cfg")
+        if not self._validate_local_server_resource():
+            return False
+
+        executable_exists = self.hdc.check_file_exists(self.remote_server_path)
+        config_exists = self.hdc.check_file_exists(self.remote_config_path)
         
         if executable_exists and config_exists:
+            manifest = self._get_server_manifest()
+            if manifest is not None:
+                remote_sha256 = self._get_remote_server_sha256()
+                remote_cfg_sha256 = self._get_remote_sha256(self.remote_config_path)
+                if remote_sha256 != manifest["sha256"] or remote_cfg_sha256 != manifest.get("config_sha256"):
+                    print_log(LogLevel.INFO, self.log_title,
+                              "设备服务端版本不匹配，将更新: "
+                              f"binary={remote_sha256}, config={remote_cfg_sha256}")
+                    return False
             print_log(LogLevel.INFO, self.log_title, f"服务已安装")
             return True
         
         print_log(LogLevel.INFO, self.log_title, f"服务未安装")
         return False
     
-    def check_server_running(self, need_print: bool = True) -> bool:
+    def check_server_running(self, need_print: bool = True, port: Optional[int] = None) -> bool:
         """检查服务端是否在运行"""
+        if port is not None:
+            result = self.hdc.execute(["shell", "netstat", "-an"])
+            listening = result.get("stdout", "")
+            pattern = re.compile(rf":{port}(?:\s|$).*\bLISTEN\b")
+            if result.get("success") and pattern.search(listening):
+                print_log(LogLevel.INFO, self.log_title, f"服务正在监听端口: {port}")
+                return True
+            if need_print:
+                print_log(LogLevel.INFO, self.log_title, f"服务未监听端口: {port}")
+            return False
+
         result = self.hdc.execute(["shell", "pgrep", "-f", "ohscrcpy_server"])
         
         if result["success"] and result["stdout"]:
@@ -205,6 +373,26 @@ class ServerManager:
             if need_print:
                 print_log(LogLevel.INFO, self.log_title, f"服务未运行")
             return False
+
+    def _is_runtime_server_running(self, port: int) -> bool:
+        # Dnakeiot reserves the default port for its init-managed legacy
+        # service. DeviceManager allocates the runtime service from 27184, so
+        # a listener on that selected port identifies this client session.
+        return self.check_server_running(need_print=False, port=port)
+
+    def ensure_server(self, port: int) -> bool:
+        """串行部署指定端口的服务端，避免预部署和连接流程并发启动。"""
+        if port <= 0 or port > 65535:
+            print_log(LogLevel.ERROR, self.log_title, f"无效服务端口: {port}")
+            return False
+
+        with _SERVER_OPERATION_LOCK:
+            if not self.check_server_installed():
+                self.stop_server()
+                if not self.install_server():
+                    return False
+
+            return self.start_server(port)
     
     def prepare_server(self) -> bool:
         """准备服务端（唤醒设备等）"""

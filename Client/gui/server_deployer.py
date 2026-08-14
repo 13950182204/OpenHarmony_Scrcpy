@@ -18,7 +18,6 @@
 """
 
 import threading
-import time
 from typing import Optional, Callable
 
 from core import LogLevel, print_log, ServerDeployState, DeviceManager
@@ -63,6 +62,12 @@ class ServerDeployer:
             update_running_status: 更新运行状态文本的函数
             ui_callback: 在主线程执行回调的函数，签名: (func) -> None，如 root.after(0, func)
         """
+        with self._lock:
+            if self._state in (ServerDeployState.INSTALLING, ServerDeployState.STARTING):
+                print_log(LogLevel.WARN, self.log_title, "服务端部署已在进行，忽略重复请求")
+                return
+            self._state = ServerDeployState.INSTALLING
+
         threading.Thread(
             target=self._deploy_async,
             args=(selected_device_name, devices, update_running_status, ui_callback),
@@ -90,38 +95,20 @@ class ServerDeployer:
             ui_callback(lambda: self._report_finish(False, "获取可用转发端口失败！"))
             return
         
-        update_running_status(f"[预安装] 正在安装服务端，请稍等...")
-        print_log(LogLevel.INFO, self.log_title, f"检查服务端安装状态...")
-        if not self.device_manager.check_server_installed(self._server_manager):
-            print_log(LogLevel.INFO, self.log_title, f"服务端未安装，开始安装...")
-            
-            if not self.device_manager.install_server(self._server_manager):
-                print_log(LogLevel.ERROR, self.log_title, f"服务端安装失败！")
-                ui_callback(lambda: self._report_finish(False, "服务端安装失败！"))
-                return
-        else:
-            print_log(LogLevel.INFO, self.log_title, f"服务端已安装")
-        
-        update_running_status(f"[预安装] 正在启动服务端，请稍等...")
-        print_log(LogLevel.INFO, self.log_title, f"检查服务端运行状态...")
-        if not self.device_manager.check_server_running(self._server_manager):
-            print_log(LogLevel.INFO, self.log_title, f"启动服务端...")
-            if not self.device_manager.start_server(self._server_manager, port):
-                print_log(LogLevel.ERROR, self.log_title, f"服务端启动失败！")
-                update_running_status(f"[预安装] 启动服务端失败！")
-                ui_callback(lambda: self._report_finish(False, "服务端启动失败！"))
-                return
-            
-            print_log(LogLevel.INFO, self.log_title, f"等待服务端就绪...")
-            time.sleep(1)
-        else:
-            print_log(LogLevel.INFO, self.log_title, f"服务端已在运行")
+        update_running_status(f"[预安装] 正在校验并启动服务端，请稍等...")
+        self._set_state(ServerDeployState.STARTING)
+        if not self._server_manager.ensure_server(port):
+            print_log(LogLevel.ERROR, self.log_title, f"服务端部署失败！")
+            update_running_status(f"[预安装] 服务端部署失败！")
+            ui_callback(lambda: self._report_finish(False, "服务端部署失败，请查看日志。"))
+            return
         
         update_running_status(f"[预安装] 服务端已就绪，可随时点击[连接]开始投屏！")
         ui_callback(lambda: self._report_finish(True, ""))
     
     def _report_finish(self, success: bool, message: str) -> None:
         """报告部署完成"""
+        self._set_state(ServerDeployState.FINISHED if success else ServerDeployState.IDLE)
         if self.on_deploy_finish:
             self.on_deploy_finish(success, message)
     
