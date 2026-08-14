@@ -47,6 +47,13 @@ class PacketType(IntEnum):
     PACKET_CONFIG = 5
     PACKET_VPS = 6
     PACKET_LOG = 7
+    PACKET_INPUT = 9
+
+
+class InputAction(IntEnum):
+    TOUCH_DOWN = 1
+    TOUCH_MOVE = 2
+    TOUCH_UP = 3
 
 # ==================== 日志级别定义 ====================
 class LogLevel(IntEnum):

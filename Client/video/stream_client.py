@@ -39,6 +39,7 @@ class VideoStreamClient:
         self.socket: Optional[socket.socket] = None
         self.is_connected: bool = False
         self.is_streaming: bool = False
+        self.supports_stream_input: bool = False
         self.config: VideoStreamConfig = VideoStreamConfig()
         self.device_manager: DeviceManager = device_manager
         
@@ -51,7 +52,7 @@ class VideoStreamClient:
         self.vps_data: Optional[bytes] = None
         
         self.raw_frame_queue: queue.Queue[Tuple[bytes, bool, int]] = queue.Queue(maxsize=100)
-        self.frame_queue: queue.Queue = queue.Queue(maxsize=50)
+        self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
         
         self.on_frame_decoded: Optional[Callable] = on_frame_decoded
         
@@ -66,6 +67,7 @@ class VideoStreamClient:
         self.recv_buffer: bytearray = bytearray()
         
         self._stop_event: threading.Event = threading.Event()
+        self._send_lock = threading.Lock()
         
         self.heartbeat_thread: Optional[threading.Thread] = None
         self.monitor_thread: Optional[threading.Thread] = None
@@ -179,13 +181,14 @@ class VideoStreamClient:
                                 self.config.fps = int(parts[3])
                                 self.config.bitrate = int(parts[4])
                                 self.config.codec = parts[5] if len(parts) > 5 else "h264"
+                                self.supports_stream_input = len(parts) > 6 and parts[6] == "input-v1"
                                 print_log(LogLevel.INFO, self.log_title, f"解析配置:"
                                       f" {self.config.width}x{self.config.height}@{self.config.fps}fps"
                                       f" bitrate:{self.config.bitrate} codec:{self.config.codec}")
                                 
                                 # 发送配置确认应答
                                 ack_msg ="CONFIG_ACK\n"
-                                self.socket.sendall(ack_msg.encode())
+                                self._send_bytes(ack_msg.encode())
                                 
                                 # 设置剩余数据为缓冲区
                                 self.recv_buffer = bytearray(remaining)
@@ -225,6 +228,31 @@ class VideoStreamClient:
         
         print_log(LogLevel.INFO, self.log_title, f"工作线程已启动")
 
+    def _send_bytes(self, payload: bytes) -> bool:
+        with self._send_lock:
+            if self.socket is None:
+                return False
+            try:
+                self.socket.sendall(payload)
+                return True
+            except OSError as error:
+                if not self._stop_event.is_set():
+                    print_log(LogLevel.WARN, self.log_title, f"Socket send failed: {error}")
+                return False
+
+    def send_touch_event(self, action: int, x: int, y: int) -> bool:
+        if not self.is_connected or not self.supports_stream_input or action not in (1, 2, 3) or x < 0 or y < 0:
+            return False
+        packet = struct.pack(
+            '>IIIII',
+            PacketType.PACKET_INPUT,
+            12,
+            action,
+            x,
+            y,
+        )
+        return self._send_bytes(packet)
+
     def _heartbeat_thread_func(self) -> None:
         """心跳线程"""
         print_log(LogLevel.INFO, self.log_title, f"心跳线程启动")
@@ -234,7 +262,7 @@ class VideoStreamClient:
                 # 发送心跳包
                 if self.socket:
                     heartbeat_packet = struct.pack('>II', PacketType.PACKET_HEARTBEAT, 0)
-                    self.socket.sendall(heartbeat_packet)
+                    self._send_bytes(heartbeat_packet)
                     if self.debug:
                         print_log(LogLevel.DEBUG, self.log_title, f"发送心跳包")
                 
@@ -529,20 +557,17 @@ class VideoStreamClient:
                             print_log(LogLevel.INFO, self.log_title, f"解码进度: 第{self.frame_count}帧, 队列={queue_size}, "
                                 f"成功={self.decoder.decode_success}, 失败={self.decoder.decode_failure}")
                         
-                        try:
-                            self.frame_queue.put_nowait(rgb_array)
-                            
-                            if self.on_frame_decoded:
-                                try:
-                                    self.on_frame_decoded(rgb_array)
-                                except Exception:
-                                    pass
-                                    
-                        except queue.Full:
+                        while True:
                             try:
                                 self.frame_queue.get_nowait()
-                                self.frame_queue.put_nowait(rgb_array)
                             except queue.Empty:
+                                break
+                        self.frame_queue.put_nowait(rgb_array)
+
+                        if self.on_frame_decoded:
+                            try:
+                                self.on_frame_decoded(rgb_array)
+                            except Exception:
                                 pass
                     else:
                         self.decode_failure += 1
@@ -568,9 +593,14 @@ class VideoStreamClient:
         print_log(LogLevel.INFO, self.log_title, f"解码线程结束")
 
     def get_current_frame(self, timeout: float = 0.001):
-        """获取当前显示帧"""
+        """获取最新解码帧，丢弃尚未显示的旧帧。"""
         try:
-            return self.frame_queue.get(timeout=timeout)
+            latest_frame = self.frame_queue.get(timeout=timeout)
+            while True:
+                try:
+                    latest_frame = self.frame_queue.get_nowait()
+                except queue.Empty:
+                    return latest_frame
         except queue.Empty:
             return None
 
@@ -579,6 +609,7 @@ class VideoStreamClient:
         self._stop_event.set()
         self.is_connected = False
         self.is_streaming = False
+        self.supports_stream_input = False
         
         self.frame_count: int = 0
         self.total_bytes: int = 0

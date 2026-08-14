@@ -7,7 +7,10 @@
 import pytest
 import time
 import threading
+from types import SimpleNamespace
 from unittest.mock import Mock, patch, MagicMock
+
+from PIL import Image
 
 from core import HDCCommandExecutor, DeviceManager, DeviceInfo, ServerDeployState
 from core.exceptions import StreamConnectError
@@ -178,6 +181,110 @@ class TestDeviceControllerReuse:
         # canvas 应该只绑定了一次
         assert mock_canvas.bind.call_count == 3
 
+    def test_virtual_capture_coordinates_map_to_physical_display(self, controller, hdc_executor):
+        """A333 的视频 canvas 与 uinput 主屏坐标必须分别缩放。"""
+        hdc_executor.execute.return_value = {
+            "success": True,
+            "stdout": (
+                "screen[0]: id=0, render resolution=800x1280, "
+                "physical resolution=800x1280, isVirtual=false\n"
+                "screen[1]: id=1, render resolution=672x1072, isVirtual=true"
+            ),
+            "stderr": "",
+        }
+        controller.bind_video_canvas(Mock())
+        controller.refresh_device_resolution(672, 1072)
+        controller.set_display_resolution(672, 1072, 672, 1072)
+
+        assert controller._window_to_device_coords(0, 0) == (0, 0)
+        assert controller._window_to_device_coords(671, 1071) == (799, 1279)
+
+    def test_device_resolution_falls_back_to_video_canvas(self, controller, hdc_executor):
+        hdc_executor.execute.return_value = {"success": False, "stdout": "", "stderr": ""}
+
+        assert controller.refresh_device_resolution(672, 1072) == (672, 1072)
+
+    @pytest.mark.parametrize(
+        "orientation, rotation",
+        [("1", 0), ("2", 90), ("3", 180), ("4", 270)],
+    )
+    def test_orientation_parameter_selects_display_rotation(
+        self, controller, hdc_executor, orientation, rotation
+    ):
+        hdc_executor.execute.return_value = {"success": True, "stdout": f"{orientation}\n", "stderr": ""}
+
+        assert controller.refresh_device_orientation() == rotation
+        assert controller.orientation_value == orientation
+        assert controller.get_display_rotation() == rotation
+        assert hdc_executor.execute.call_args.args[0] == [
+            "shell", "param", "get", "persist.sys.orientation"
+        ]
+
+    def test_invalid_orientation_falls_back_to_portrait(self, controller, hdc_executor):
+        controller.display_rotation = 180
+        controller.orientation_value = "3"
+        hdc_executor.execute.return_value = {"success": True, "stdout": "9\n", "stderr": ""}
+
+        assert controller.refresh_device_orientation() == 0
+        assert controller.orientation_value == "1"
+
+    @pytest.mark.parametrize(
+        "rotation, display_size, start, end, expected_start, expected_end",
+        [
+            (0, (3, 2), (1, 0), (1, 1), (400, 0), (400, 1279)),
+            (90, (2, 3), (1, 0), (1, 2), (1279, 0), (1279, 799)),
+            (180, (3, 2), (1, 0), (1, 1), (400, 0), (400, 1279)),
+            (270, (2, 3), (1, 0), (1, 2), (1279, 0), (1279, 799)),
+        ],
+    )
+    def test_touch_coordinates_follow_display_axes_each_rotation(
+        self, controller, rotation, display_size, start, end, expected_start, expected_end
+    ):
+        controller.bind_video_canvas(Mock())
+        controller.device_width = 800
+        controller.device_height = 1280
+        controller.display_rotation = rotation
+        controller.set_display_resolution(*display_size, 300, 300)
+
+        def window_point(point):
+            return (
+                int(controller.left + point[0] * controller.display_ratio),
+                int(controller.top + point[1] * controller.display_ratio),
+            )
+
+        assert controller._window_to_device_coords(*window_point(start)) == expected_start
+        assert controller._window_to_device_coords(*window_point(end)) == expected_end
+
+    @pytest.mark.parametrize("rotation", [90, 270])
+    def test_landscape_bottom_edge_stays_inside_touch_bounds(self, controller, rotation):
+        controller.bind_video_canvas(Mock())
+        controller.device_width = 800
+        controller.device_height = 1280
+        controller.display_rotation = rotation
+        controller.set_display_resolution(1072, 672, 1072, 672)
+
+        assert controller._get_touch_resolution() == (1280, 800)
+        assert controller._window_to_device_coords(1071, 671) == (1279, 799)
+
+    def test_canvas_drag_uses_stream_touch_events(self, controller):
+        stream_client = Mock()
+        stream_client.send_touch_event.return_value = True
+        controller.bind_video_canvas(Mock())
+        controller.set_display_resolution(672, 1072, 672, 1072)
+        controller.device_width = 800
+        controller.device_height = 1280
+        controller.set_video_client(stream_client)
+
+        controller._on_mouse_down(SimpleNamespace(x=0, y=0))
+        controller._on_mouse_drag(SimpleNamespace(x=671, y=1071))
+        controller._on_mouse_up(SimpleNamespace(x=671, y=1071))
+
+        assert stream_client.send_touch_event.call_args_list == [
+            ((1, 0, 0),),
+            ((2, 799, 1279),),
+            ((3, 799, 1279),),
+        ]
+
 
 class TestConnectionManagerLifecycle:
     """测试 ConnectionManager 的完整生命周期"""
@@ -279,6 +386,37 @@ class TestVideoDisplayReset:
         assert video_display.image_refs == []
         assert video_display._render_scheduled == False
 
+    def test_schedule_render_starts_only_one_loop(self, video_display):
+        video_display.schedule_render()
+        video_display.schedule_render()
+
+        assert video_display.root.after.call_count == 1
+        assert video_display._render_active is True
+
+        video_display.reset()
+        assert video_display._render_active is False
+
+    @pytest.mark.parametrize(
+        "rotation, expected_size, expected_pixels",
+        [
+            (0, (3, 2), [1, 2, 3, 4, 5, 6]),
+            (90, (2, 3), [4, 1, 5, 2, 6, 3]),
+            (180, (3, 2), [6, 5, 4, 3, 2, 1]),
+            (270, (2, 3), [3, 6, 2, 5, 1, 4]),
+        ],
+    )
+    def test_frame_rotation_matches_orientation_parameter(
+        self, video_display, rotation, expected_size, expected_pixels
+    ):
+        video_display.device_controller.get_display_rotation.return_value = rotation
+        frame = Image.new("L", (3, 2))
+        frame.putdata([1, 2, 3, 4, 5, 6])
+
+        oriented = video_display._orient_frame(frame)
+
+        assert oriented.size == expected_size
+        assert list(oriented.getdata()) == expected_pixels
+        assert video_display.frame_rotation == rotation
 
 class TestFullIntegrationScenario:
     """完整集成场景测试"""

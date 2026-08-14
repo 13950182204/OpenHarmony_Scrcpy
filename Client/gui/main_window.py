@@ -65,6 +65,8 @@ class MainWindow:
         self.is_connected = False
         self.server_deploy_lock = threading.Lock()
         self.server_deploy_state = ServerDeployState.IDLE
+        self.connection_attempt_lock = threading.Lock()
+        self.connection_attempt_in_progress = False
         
         self.video_canvas = None
         self.status_text_id = None
@@ -276,10 +278,10 @@ class MainWindow:
         about_window.focus_set()
     
     def _update_video_display(self) -> None:
-        """更新视频显示（委托给 VideoDisplay）"""
+        """启动视频显示循环（委托给 VideoDisplay）。"""
         if self.video_display is None:
             return
-        self.video_display._do_render()
+        self.video_display.schedule_render()
     
     def _show_waiting_screen(self) -> None:
         """显示等待画面"""
@@ -427,12 +429,17 @@ class MainWindow:
     
     def _on_server_deploy_finish(self, succ: bool, msg: str) -> None:
         """服务部署完成回调"""
+        self._set_server_deploy_state(ServerDeployState.FINISHED if succ else ServerDeployState.IDLE)
         self.connection_status_label.config(text="未连接", fg="#e74c3c")
         if not succ:
             messagebox.showerror("错误", f"{msg}")
     
     def _install_and_start_server_async(self) -> None:
         """异步安装并启动服务端"""
+        if self._get_server_deploy_state() in (ServerDeployState.INSTALLING, ServerDeployState.STARTING):
+            print_log(LogLevel.INFO, self.log_title, "服务端正在准备，忽略重复部署请求")
+            return
+
         was_connected = self.is_connected
         
         # 切换设备时先断开旧连接
@@ -450,6 +457,7 @@ class MainWindow:
         self.device_panel.set_connect_button_state("连接", "#2ecc71")
         self.connection_status_label.config(text="未连接", fg="#e74c3c")
         self.performance_label.config(text="FPS: 0")
+        self._set_server_deploy_state(ServerDeployState.INSTALLING)
         
         self.server_deployer.deploy(
             selected_device_name=selected,
@@ -460,9 +468,21 @@ class MainWindow:
     
     def _connect_device(self) -> None:
         """连接设备"""
+        if self._get_server_deploy_state() in (ServerDeployState.INSTALLING, ServerDeployState.STARTING):
+            self._update_device_status("服务端正在准备，请稍后连接")
+            return
+
+        with self.connection_attempt_lock:
+            if self.connection_attempt_in_progress:
+                print_log(LogLevel.INFO, self.log_title, "连接正在进行，忽略重复请求")
+                return
+            self.connection_attempt_in_progress = True
+
         selected = self.device_panel.get_selected_device()
         if not selected:
             messagebox.showwarning("警告", "请先选择设备")
+            with self.connection_attempt_lock:
+                self.connection_attempt_in_progress = False
             return
         
         target_device: Optional[Any] = None
@@ -473,35 +493,40 @@ class MainWindow:
         
         if not target_device or not self.device_manager.select_device(target_device.sn):
             self._update_device_status("设备选择失败")
+            with self.connection_attempt_lock:
+                self.connection_attempt_in_progress = False
             return
         
         def connect_device_async() -> None:
-            port = self.device_manager.get_port_forwarding()
-            if port == -1:
-                print_log(LogLevel.ERROR, self.log_title, f"获取可用转发端口失败")
-                self.device_panel.set_connect_button_state("连接", "#2ecc71")
-                return
-            
-            # 复用或创建 ServerManager
-            self.connection_manager.ensure_server_manager(target_device.manufacturer, self.hdc_executor)
-            
-            if not self._install_and_start_server(port, self.connection_manager.get_server_manager()):
-                self.device_panel.set_connect_button_state("连接", "#2ecc71")
-                return
-
-            print_log(LogLevel.INFO, self.log_title, f"设置端口转发...")
-            if not self.device_manager.setup_port_forwarding(port, port):
-                print_log(LogLevel.ERROR, self.log_title, f"端口转发失败，请尝试重新连接...")
-                self.device_panel.set_connect_button_state("连接", "#2ecc71")
-                return
-
             try:
+                port = self.device_manager.get_port_forwarding()
+                if port == -1:
+                    print_log(LogLevel.ERROR, self.log_title, f"获取可用转发端口失败")
+                    self.device_panel.set_connect_button_state("连接", "#2ecc71")
+                    return
+
+                # 复用或创建 ServerManager
+                self.connection_manager.ensure_server_manager(target_device.manufacturer, self.hdc_executor)
+
+                if not self._install_and_start_server(port, self.connection_manager.get_server_manager()):
+                    self.device_panel.set_connect_button_state("连接", "#2ecc71")
+                    return
+
+                print_log(LogLevel.INFO, self.log_title, f"设置端口转发...")
+                if not self.device_manager.setup_port_forwarding(port, port):
+                    print_log(LogLevel.ERROR, self.log_title, f"端口转发失败，请尝试重新连接...")
+                    self.device_panel.set_connect_button_state("连接", "#2ecc71")
+                    return
+
                 device = self.device_manager.get_current_device()
                 self._update_device_status(f"正在连接设备: {device.sn}...")
             
                 print_log(LogLevel.DEBUG, self.log_title, f"连接视频流服务器...")
                 if self.connection_manager.connect(port):
                     config = self.connection_manager.get_video_client().config
+                    self.device_controller.set_video_client(self.connection_manager.get_video_client())
+                    self.device_controller.refresh_device_resolution(config.width, config.height)
+                    self.device_controller.refresh_device_orientation()
                     self.is_connected = True
                     self.device_panel.set_connect_button_state("断开", "#e74c3c")
                     self.connection_status_label.config(text="已连接", fg="#2ecc71")
@@ -531,37 +556,16 @@ class MainWindow:
                 self._update_device_status(f"连接失败: {str(e)}")
                 traceback.print_exc()
                 self._disconnect_device()
-                return
+            finally:
+                with self.connection_attempt_lock:
+                    self.connection_attempt_in_progress = False
         
         threading.Thread(target=connect_device_async, daemon=True).start()
         self.device_panel.set_connect_button_state("连接中", "#e74c3c")
     
     def _install_and_start_server(self, port: int, server_manager) -> bool:
         """安装并启动服务端"""
-        print_log(LogLevel.INFO, self.log_title, f"检查服务端安装状态...")
-        if not self.device_manager.check_server_installed(server_manager):
-            print_log(LogLevel.INFO, self.log_title, f"服务端未安装，开始安装...")
-            
-            if not self.device_manager.install_server(server_manager):
-                messagebox.showerror("错误", "服务端安装失败！")
-                print_log(LogLevel.ERROR, self.log_title, f"服务端安装失败")
-                return False
-        else:
-            print_log(LogLevel.INFO, self.log_title, f"服务端已安装")
-        
-        print_log(LogLevel.INFO, self.log_title, f"检查服务端运行状态...")
-        if not self.device_manager.check_server_running(server_manager):
-            print_log(LogLevel.INFO, self.log_title, f"启动服务端...")
-            if not self.device_manager.start_server(server_manager, port):
-                messagebox.showerror("错误", f"服务端启动失败！")
-                print_log(LogLevel.ERROR, self.log_title, f"服务端启动失败")
-                return False
-            
-            print_log(LogLevel.INFO, self.log_title, f"等待服务端就绪...")
-            time.sleep(1)
-        else:
-            print_log(LogLevel.INFO, self.log_title, f"服务端已在运行")
-        return True
+        return server_manager.ensure_server(port)
     
     def _disconnect_device(self) -> None:
         """断开设备"""

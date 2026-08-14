@@ -187,6 +187,18 @@ class IDeviceController(Protocol):
     def set_display_resolution(self, video_width: int, video_height: int, canvas_width: int, canvas_height: int) -> Tuple[int, int, float]:
         """计算并设置显示分辨率"""
         ...
+
+    def refresh_device_resolution(self, fallback_width: int, fallback_height: int) -> Tuple[int, int]:
+        """读取用于触控注入的设备屏幕坐标尺寸"""
+        ...
+
+    def refresh_device_orientation(self) -> int:
+        """只读刷新 persist.sys.orientation 对应的显示旋转角度"""
+        ...
+
+    def get_display_rotation(self) -> int:
+        """获取当前显示帧的顺时针旋转角度"""
+        ...
     
     def handle_click(self, x: int, y: int) -> None:
         """处理点击"""

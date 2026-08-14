@@ -34,6 +34,7 @@ class TestPacketType:
         assert PacketType.PACKET_FRAME == 4
         assert PacketType.PACKET_CONFIG == 5
         assert PacketType.PACKET_VPS == 6
+        assert PacketType.PACKET_INPUT == 9
     
     def test_packet_header_size(self):
         """测试包头大小"""

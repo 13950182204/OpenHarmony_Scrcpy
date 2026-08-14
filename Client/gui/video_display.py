@@ -23,6 +23,8 @@ import threading
 import tkinter as tk
 from typing import Optional
 
+from PIL import Image
+
 from gui.device_controller import DeviceController
 from core import HEARTBEAT_TIMEOUT, LogLevel, print_log
 
@@ -46,6 +48,9 @@ class VideoDisplay:
         
         self.video_width = 0
         self.video_height = 0
+        self.source_video_width = 0
+        self.source_video_height = 0
+        self.frame_rotation = 0
         self.video_ratio = 0.0
         self.display_width = 0
         self.display_height = 0
@@ -66,7 +71,10 @@ class VideoDisplay:
         self.running_status_text_id = None
         
         self._render_scheduled = False
+        self._render_active = False
+        self._render_after_id = None
         self.last_display_time = 0.0
+        self._canvas_size = (0, 0)
         
         self.log_title = "视频显示器"
     
@@ -82,14 +90,35 @@ class VideoDisplay:
             self.last_fps_time = current_time
     
     def schedule_render(self) -> None:
-        """调度渲染（防止递归累积）"""
-        if not self._render_scheduled:
+        """Start one render loop for the current connection."""
+        if self._render_active:
+            return
+        self._render_active = True
+        self._schedule_next_render(0)
+
+    def _schedule_next_render(self, delay_ms: int) -> None:
+        if self._render_active and not self._render_scheduled:
             self._render_scheduled = True
-            self.root.after(16, self._do_render)
-    
+            self._render_after_id = self.root.after(delay_ms, self._do_render)
+
+    def _orient_frame(self, frame: Image.Image) -> Image.Image:
+        """Apply the rotation selected from persist.sys.orientation."""
+        rotation = self.device_controller.get_display_rotation() if self.device_controller else 0
+        self.frame_rotation = rotation if rotation in (0, 90, 180, 270) else 0
+        if self.frame_rotation == 90:
+            return frame.transpose(Image.Transpose.ROTATE_270)
+        if self.frame_rotation == 180:
+            return frame.transpose(Image.Transpose.ROTATE_180)
+        if self.frame_rotation == 270:
+            return frame.transpose(Image.Transpose.ROTATE_90)
+        return frame
+
     def _do_render(self) -> None:
         """执行渲染"""
         self._render_scheduled = False
+        self._render_after_id = None
+        if not self._render_active:
+            return
         
         current_time = time.time()
         
@@ -101,22 +130,19 @@ class VideoDisplay:
                     print_log(LogLevel.WARN, self.log_title, f"检测到心跳超时 ({time_since_last_data:.1f}秒)，断开连接")
                     return
         
-        if current_time - self.last_display_time < 0.033:
-            self.root.after(10, lambda: self._do_render())
+        if current_time - self.last_display_time < (1.0 / 60.0):
+            self._schedule_next_render(5)
             return
         
         self.last_display_time = current_time
         
         if not self.connection_manager or not self.connection_manager.is_connected:
-            self.root.after(100, lambda: self._do_render())
+            self._schedule_next_render(100)
             return
         
         try:
             video_client = self.connection_manager.get_video_client()
-            frame = video_client.get_current_frame(timeout=0.001) if video_client else None
-            if frame is None:
-                frame = self.current_frame
-            
+            frame = video_client.get_current_frame(timeout=0) if video_client else None
             if frame is not None:
                 self.displayed_frames += 1
                 
@@ -128,21 +154,32 @@ class VideoDisplay:
                     self.last_gc_frame_count = self.displayed_frames
                 
                 try:
-                    from PIL import Image
                     pil_img = Image.fromarray(frame)
+                    source_width, source_height = pil_img.size
+                    pil_img = self._orient_frame(pil_img)
                 except Exception as e:
                     print_log(LogLevel.ERROR, self.log_title, f"创建PIL图像失败: {e}")
-                    self.root.after(10, lambda: self._do_render())
+                    self._schedule_next_render(10)
                     return
                 
                 canvas_width = self.canvas.winfo_width()
                 canvas_width = 800 if canvas_width <= 10 else canvas_width
                 canvas_height = self.canvas.winfo_height()
                 canvas_height = 600 if canvas_height <= 10 else canvas_height
+                canvas_size = (canvas_width, canvas_height)
                 
-                if self.video_width != pil_img.width or self.video_height != pil_img.height:
+                if (
+                    self.video_width != pil_img.width
+                    or self.video_height != pil_img.height
+                    or self.source_video_width != source_width
+                    or self.source_video_height != source_height
+                    or self._canvas_size != canvas_size
+                ):
+                    self.source_video_width = source_width
+                    self.source_video_height = source_height
                     self.video_width = pil_img.width
                     self.video_height = pil_img.height
+                    self._canvas_size = canvas_size
                     self.video_ratio = 0.0
                     print_log(LogLevel.INFO, self.log_title, f"原始视频尺寸: {self.video_width}x{self.video_height}")
                     print_log(LogLevel.INFO, self.log_title, f"画布尺寸: {canvas_width}x{canvas_height}")
@@ -153,7 +190,7 @@ class VideoDisplay:
                 
                 try:
                     pil_img_resized = pil_img.resize((self.display_width, self.display_height),
-                                                     Image.Resampling.LANCZOS)
+                                                     Image.Resampling.BILINEAR)
                 except Exception as e:
                     print_log(LogLevel.ERROR, self.log_title, f"缩放图像失败: {e}")
                     pil_img_resized = pil_img
@@ -167,7 +204,7 @@ class VideoDisplay:
                     self.image_refs.append(self.tk_image)
                 except Exception as e:
                     print_log(LogLevel.ERROR, self.log_title, f"创建Tkinter图像失败: {e}")
-                    self.root.after(10, lambda: self._do_render())
+                    self._schedule_next_render(10)
                     return
                 
                 self.canvas.delete("all")
@@ -205,7 +242,7 @@ class VideoDisplay:
             if self.connection_manager and self.connection_manager.is_connected:
                 print_log(LogLevel.ERROR, self.log_title, f"显示错误: {e}")
         
-        self.root.after(10, lambda: self._do_render())
+        self._schedule_next_render(10)
     
     def show_waiting_screen(self, message: str = "等待连接...") -> None:
         """显示等待画面"""
@@ -249,8 +286,18 @@ class VideoDisplay:
     
     def reset(self) -> None:
         """重置显示状态"""
+        self._render_active = False
+        if self._render_after_id is not None:
+            try:
+                self.root.after_cancel(self._render_after_id)
+            except (tk.TclError, AttributeError):
+                pass
+        self._render_after_id = None
         self.video_width = 0
         self.video_height = 0
+        self.source_video_width = 0
+        self.source_video_height = 0
+        self.frame_rotation = 0
         self.video_ratio = 0.0
         self.display_width = 0
         self.display_height = 0
@@ -262,6 +309,7 @@ class VideoDisplay:
         self.tk_image = None
         self.image_refs.clear()
         self._render_scheduled = False
+        self._canvas_size = (0, 0)
     
     def force_garbage_collection(self) -> None:
         """强制垃圾回收"""

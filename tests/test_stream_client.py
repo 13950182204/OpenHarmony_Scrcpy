@@ -49,7 +49,7 @@ class TestVideoStreamClientInit:
         assert client.socket is None
         assert client.is_connected == False
         assert client.is_streaming == False
-        assert client.frame_queue.maxsize == 50
+        assert client.frame_queue.maxsize == 1
     
     def test_init_with_callback(self, mock_device_manager):
         """测试带回调初始化"""
@@ -77,7 +77,7 @@ class TestVideoStreamClientQueue:
     
     def test_frame_queue_size(self, client):
         """测试帧队列大小限制"""
-        assert client.frame_queue.maxsize == 50
+        assert client.frame_queue.maxsize == 1
     
     def test_get_current_frame_empty(self, client):
         """测试空队列获取帧"""
@@ -94,6 +94,17 @@ class TestVideoStreamClientQueue:
         retrieved = client.get_current_frame(timeout=0.001)
         assert retrieved is not None
         assert retrieved.shape == (100, 100, 3)
+
+    def test_get_current_frame_returns_the_newest_queued_frame(self, client):
+        import numpy as np
+
+        old_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+        new_frame = np.ones((1, 1, 3), dtype=np.uint8)
+        client.frame_queue.put_nowait(old_frame)
+        client.frame_queue.get_nowait()
+        client.frame_queue.put_nowait(new_frame)
+
+        assert client.get_current_frame(timeout=0) is new_frame
 
 
 class TestVideoStreamClientConfig:
@@ -117,6 +128,15 @@ class TestVideoStreamClientConfig:
     def test_queue_threshold(self, client):
         """测试队列阈值"""
         assert client.queue_threshold == 35
+
+    def test_send_touch_event_uses_a_fixed_network_packet(self, client):
+        client.socket = Mock()
+        client.is_connected = True
+        client.supports_stream_input = True
+
+        assert client.send_touch_event(2, 799, 1279) is True
+        packet = client.socket.sendall.call_args.args[0]
+        assert struct.unpack('>IIIII', packet) == (PacketType.PACKET_INPUT, 12, 2, 799, 1279)
 
 
 class TestVideoStreamClientPacketHandling:
