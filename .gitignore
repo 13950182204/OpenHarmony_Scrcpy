@@ -13,6 +13,15 @@ AGENTS.md
 # BUILD
 Package/Executer/output/
 Package/Installer/output/
+Package/A333_Dnakeiot_Staging/
+Package/A333_Temporary_Staging/
+Release/
 
 # LOG
 logs/
+verification/
+work/
+
+# PYTHON
+__pycache__/
+*.py[cod]
