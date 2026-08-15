@@ -86,7 +86,8 @@ class ServerDeployer:
             ui_callback(lambda: self._report_finish(False, "设备选择失败"))
             return
         
-        self._server_manager = self.device_manager.create_server_manager(target_device.manufacturer)
+        self._server_manager = self.device_manager.create_server_manager(
+            target_device.manufacturer, target_device.product_name)
         
         update_running_status(f"[预安装] 正在获取可用转发端口，请稍等...")
         port = self.device_manager.get_port_forwarding()

@@ -4,12 +4,11 @@ chcp 65001 >nul
 
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%.."
-set "STAGING_DIR=%SCRIPT_DIR%A333_Temporary_Staging"
-set "RELEASE_DIR=%PROJECT_ROOT%\Release\OHScrcpy-A333-Temporary-NoFrameCounter"
-set "MODE_MARKER=a333_temporary_mode.flag"
+set "STAGING_DIR=%SCRIPT_DIR%A333_Dnakeiot_Staging"
+set "RELEASE_DIR=%PROJECT_ROOT%\Release\OHScrcpy-Dnakeiot"
+set "MODE_MARKER=dnakeiot_combined_mode.flag"
 
-echo [INFO] Building the all-device A333 temporary Windows release.
-echo [INFO] Every selected device will receive the Dnakeiot A333 server resource.
+echo [INFO] Building the Dnakeiot combined (A333 + RK3568) Windows release.
 
 where python >nul 2>nul || (
     echo [ERROR] Python 3 is required.
@@ -20,13 +19,13 @@ if not exist "%PROJECT_ROOT%\Server\bin\Dnakeiot\ohscrcpy_server" (
     echo [ERROR] Missing Dnakeiot AArch64 server resource.
     exit /b 1
 )
-
-if not exist "%PROJECT_ROOT%\Server\bin\Dnakeiot\server_manifest.json" (
-    echo [ERROR] Missing Dnakeiot server manifest.
+if not exist "%PROJECT_ROOT%\Server\bin\Dnakeiot_RK3568\ohscrcpy_server" (
+    echo [ERROR] Missing Dnakeiot_RK3568 AArch64 server resource.
     exit /b 1
 )
 
 python "%PROJECT_ROOT%\tools\verify_dnakeiot_a333_resource.py" "%PROJECT_ROOT%\Server\bin\Dnakeiot" || exit /b 1
+python "%PROJECT_ROOT%\tools\verify_dnakeiot_a333_resource.py" "%PROJECT_ROOT%\Server\bin\Dnakeiot_RK3568" || exit /b 1
 
 if exist "%STAGING_DIR%" rmdir /s /q "%STAGING_DIR%"
 mkdir "%STAGING_DIR%" || exit /b 1
@@ -38,6 +37,7 @@ xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\utils" "%STAGING_DIR%\utils" >nul || go
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\config" "%STAGING_DIR%\config" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\hdc" "%STAGING_DIR%\hdc" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Server\bin\Dnakeiot" "%STAGING_DIR%\Dnakeiot" >nul || goto :error
+xcopy /E /I /Q /Y "%PROJECT_ROOT%\Server\bin\Dnakeiot_RK3568" "%STAGING_DIR%\Dnakeiot_RK3568" >nul || goto :error
 copy /Y "%PROJECT_ROOT%\Client\main.py" "%STAGING_DIR%\main.py" >nul || goto :error
 copy /Y "%PROJECT_ROOT%\Client\requirements.txt" "%STAGING_DIR%\requirements.txt" >nul || goto :error
 copy /Y "%SCRIPT_DIR%\Executer\app.ico" "%STAGING_DIR%\app.ico" >nul || goto :error
@@ -49,6 +49,7 @@ python -m pip install -r requirements.txt pyinstaller || goto :error_popd
 python -m PyInstaller main.py --name "OHScrcpy" --noconfirm --clean --windowed --onedir ^
     --collect-submodules core --collect-submodules video --collect-submodules gui --collect-submodules utils ^
     --add-data "Dnakeiot;Dnakeiot" ^
+    --add-data "Dnakeiot_RK3568;Dnakeiot_RK3568" ^
     --add-data "%MODE_MARKER%;." ^
     --add-data "hdc\Windows\x64\hdc.exe;." ^
     --add-data "hdc\Windows\x64\libusb_shared.dll;." ^
@@ -58,6 +59,8 @@ python -m PyInstaller main.py --name "OHScrcpy" --noconfirm --clean --windowed -
 if not exist "dist\OHScrcpy\OHScrcpy.exe" goto :error_popd
 if not exist "dist\OHScrcpy\_internal\Dnakeiot\ohscrcpy_server" goto :error_popd
 if not exist "dist\OHScrcpy\_internal\Dnakeiot\server_manifest.json" goto :error_popd
+if not exist "dist\OHScrcpy\_internal\Dnakeiot_RK3568\ohscrcpy_server" goto :error_popd
+if not exist "dist\OHScrcpy\_internal\Dnakeiot_RK3568\server_manifest.json" goto :error_popd
 if not exist "dist\OHScrcpy\_internal\%MODE_MARKER%" goto :error_popd
 
 if exist "%RELEASE_DIR%" rmdir /s /q "%RELEASE_DIR%"
@@ -66,12 +69,12 @@ xcopy /E /I /Q /Y "dist\OHScrcpy" "%RELEASE_DIR%" >nul || goto :error_popd
 certutil -hashfile "%RELEASE_DIR%\OHScrcpy.exe" SHA256 > "%RELEASE_DIR%\OHScrcpy.exe.sha256"
 popd
 
-echo [OK] Temporary release created: %RELEASE_DIR%\OHScrcpy.exe
-echo [OK] This release always deploys the Dnakeiot A333 server resource.
+echo [OK] Combined release created: %RELEASE_DIR%\OHScrcpy.exe
+echo [OK] A333 uses Dnakeiot (CedarC) resource; RK3568 uses Dnakeiot_RK3568 (generic codec) resource.
 exit /b 0
 
 :error_popd
 popd
 :error
-echo [ERROR] Windows temporary release build failed.
+echo [ERROR] Combined Windows release build failed.
 exit /b 1

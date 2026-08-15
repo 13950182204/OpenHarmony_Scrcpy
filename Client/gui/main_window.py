@@ -506,7 +506,8 @@ class MainWindow:
                     return
 
                 # 复用或创建 ServerManager
-                self.connection_manager.ensure_server_manager(target_device.manufacturer, self.hdc_executor)
+                self.connection_manager.ensure_server_manager(target_device.manufacturer, self.hdc_executor,
+                                                       target_device.product_name)
 
                 if not self._install_and_start_server(port, self.connection_manager.get_server_manager()):
                     self.device_panel.set_connect_button_state("连接", "#2ecc71")

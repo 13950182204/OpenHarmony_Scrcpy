@@ -1,10 +1,10 @@
 {
   "name": "ohscrcpy_server",
   "target_manufacturer": "Dnakeiot",
-  "target_product": "a333_newpines",
+  "target_product": "rk3568",
   "target_abi": "aarch64",
-  "protocol": "h264-tcp-v1+input-v1",
-  "canvas": "672x1072",
-  "sha256": "e9b825992a2b49e029e6e4af79107c91f20b5f7ab099b8fefc8f5648cea75fca",
+  "protocol": "h264/h265-tcp-v1+input-v1",
+  "canvas": "800x1280",
+  "sha256": "5ea0051a0fddb07d17d203693fc475adc6935b946789af40e0744cebe7877652",
   "config_sha256": "6a63d4d1a5d7897f808641da1c44da164878d73ecf58c7646b1adae360f8a469"
 }

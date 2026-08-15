@@ -33,6 +33,7 @@ class DeviceInfo:
     sn: str
     model: str = "Unknown Model"
     manufacturer: str = "default"
+    product_name: str = ""
     
     def display_name(self) -> str:
         return f"{self.sn[:8]}****{self.sn[-8:]} ({self.model})"
@@ -71,7 +72,9 @@ class DeviceManager:
                 continue
             model = self.get_device_param(sn, "const.product.model")
             manufacturer = self.get_device_param(sn, "const.product.manufacturer")
-            devices.append(DeviceInfo(sn=sn, model=model, manufacturer=manufacturer))
+            product_name = self.get_device_param(sn, "const.product.name")
+            devices.append(DeviceInfo(sn=sn, model=model, manufacturer=manufacturer,
+                                      product_name=product_name))
         
         self.devices = devices
         return devices
@@ -177,10 +180,10 @@ class DeviceManager:
         print_log(LogLevel.INFO, self.log_title, f"移除端口转发转发成功: [{local_port}, {remote_port}]")
         return True
     
-    def create_server_manager(self, manufacturer: str):
+    def create_server_manager(self, manufacturer: str, product_name: str = ""):
         """创建服务端管理器"""
         from .server_manager import ServerManager
-        return ServerManager(manufacturer, self.hdc)
+        return ServerManager(manufacturer, self.hdc, product_name=product_name)
     
     def install_server(self, server_manager) -> bool:
         """安装服务端"""

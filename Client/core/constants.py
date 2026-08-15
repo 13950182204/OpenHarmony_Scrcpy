@@ -19,12 +19,17 @@ OpenHarmony_Scrcpy 常量与枚举定义
 
 from enum import IntEnum, auto
 
-from .runtime_mode import is_a333_temporary_mode
+from .runtime_mode import is_a333_temporary_mode, is_dnakeiot_combined_mode
 
 # ==================== 项目信息 ====================
 AUTHOR = "luodh0157"
 PROJECT_URL = "https://gitcode.com/OpenHarmony_Tools/OpenHarmony_Scrcpy"
-VERSION = "v2.3.2-a333-temp" if is_a333_temporary_mode() else "v2.3.2-a333"
+if is_dnakeiot_combined_mode():
+    VERSION = "v2.4.0-dnakeiot"
+elif is_a333_temporary_mode():
+    VERSION = "v2.3.2-a333-temp"
+else:
+    VERSION = "v2.3.2-a333"
 
 # ==================== 网络配置 ====================
 DEFAULT_PORT = 27183

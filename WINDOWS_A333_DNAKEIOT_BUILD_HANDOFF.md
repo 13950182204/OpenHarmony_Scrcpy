@@ -73,3 +73,62 @@ The previous Windows package used a generic resource fallback and only checked w
 3. Confirm the client log reports uploads to `/data/local/tmp/`, port `27184`, and the A333 `672x1072` configuration, not `1280x800`.
 4. Operate the device for at least 30 seconds and confirm the image changes and FPS is at least 60. A static page is still encoded at the negotiated 60fps; capture callbacks are content-change driven on A333.
 5. Save the client log, matching `/data/local/tmp/server_*.log`, and one displayed frame.
+## RK3568 Combined Release (2026-08-15)
+
+### New release: `Release\OHScrcpy-Dnakeiot\OHScrcpy.exe` (v2.4.0-dnakeiot)
+
+A single executable now serves both device families (window title shows `v2.4.0-dnakeiot`):
+
+| Device | manufacturer | product name | profile resource | encoder path |
+|---|---|---|---|---|
+| A333 (a333_newpines) | Dnakeiot | (non-RK3568) | `_internal\Dnakeiot\` | CedarC AVC (672x1072) |
+| RK3568 (DHong-RK3568-Development-Board) | Dnakeiot | contains `RK3568` | `_internal\Dnakeiot_RK3568\` | generic OH_VideoEncoder (H.264/H.265, 800x1280) |
+
+### Build
+
+```cmd
+cd /d D:\ohos\OpenHarmony_Scrcpy
+Package\build_dnakeiot_combined_windows.bat
+```
+
+Also available: `Package\build_dnakeiot_rk3568_windows.bat` (RK3568-only release, `Release\OHScrcpy-Dnakeiot-RK3568`).
+The original A333-only build (`build_dnakeiot_a333_windows.bat`) is unchanged.
+
+### What changed in the client
+
+- `Client/core/device_manager.py`: `DeviceInfo` now carries `product_name` (`const.product.name`) and
+  `create_server_manager` forwards it.
+- `Client/core/runtime_mode.py`: `get_runtime_resource_profile(manufacturer, product_name)` —
+  Dnakeiot + product containing `RK3568` resolves to `Dnakeiot_RK3568`; new `dnakeiot_combined_mode.flag`
+  marker (checked at `_internal` root) selects the combined version string.
+- `Client/core/server_manager.py`: profile-aware resource lookup (packaged `_internal/<profile>/`,
+  dev fallback `Server/bin/<profile>/`), Dnakeiot-family runtime-port behavior for both profiles,
+  plus `check_device_abi()`: probes `/lib/ld-musl-aarch64.so.1` then `/system/lib64/` before any
+  deployment and rejects 32-bit images with a clear error.
+- `Client/gui/connection_manager.py`, `main_window.py`, `server_deployer.py`: thread
+  `product_name` through.
+- `Client/core/constants.py`: version `v2.4.0-dnakeiot` when the combined marker is present
+  (A333 builds keep `v2.3.2-a333`).
+
+### Resource manifest fix
+
+`Server/bin/Dnakeiot/server_manifest.json` had a stale `config_sha256` (matched an old CRLF/BOM
+packaged cfg). Both manifests now point at the canonical LF cfg
+(`6a63d4d1...`). `tools/verify_dnakeiot_a333_resource.py` passes for both
+`Server/bin/Dnakeiot` and `Server/bin/Dnakeiot_RK3568`.
+
+### Verification (device 150100414a54443452061dcd48f7c800, DHong-RK3568-Development-Board)
+
+The `Dnakeiot_RK3568` resource is the tree-built 64-bit server
+(sha256 `5ea0051a...`). On the device it negotiated `SCREEN_INFO:800:1280:60:1500000:h265:input-v1`,
+streamed valid H.265 VPS/SPS/PPS/IDR/frames and processed touch input. See the wiki section
+"RK3568 64位兼容" for the full record. Headless checks against the packaged `_internal` resources
+pass for both profiles (resource selection, manifest SHA-256 validation, device ABI check).
+
+### Acceptance for the combined exe
+
+1. Connect an A333 device: expect `_internal\Dnakeiot\` upload, port 27184+, `672x1072`.
+2. Connect the RK3568 device: expect `_internal\Dnakeiot_RK3568\` upload, port 27184+,
+   `SCREEN_INFO:800:1280:...`, H.265 hardware encode, FPS ~60.
+3. Window title shows `v2.4.0-dnakeiot`; client log includes post-deployment device SHA-256
+   verification before connecting.

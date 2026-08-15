@@ -30,7 +30,7 @@ from typing import Optional
 from .constants import LogLevel
 from .logger import print_log, get_log_file
 from .hdc_executor import HDCCommandExecutor
-from .runtime_mode import get_runtime_resource_profile
+from .runtime_mode import DNAKEIOT_FAMILY, get_runtime_resource_profile
 
 _SERVER_OPERATION_LOCK = threading.RLock()
 
@@ -38,10 +38,12 @@ _SERVER_OPERATION_LOCK = threading.RLock()
 class ServerManager:
     """服务端管理器"""
     
-    def __init__(self, manufacturer: str, hdc_executor: HDCCommandExecutor) -> None:
+    def __init__(self, manufacturer: str, hdc_executor: HDCCommandExecutor,
+                 product_name: str = "") -> None:
         self.hdc = hdc_executor
         self.server_process: Optional[subprocess.Popen] = None
         self.manufacturer = manufacturer
+        self.product_name = product_name
         self.log_title = "服务端管理器"
         # Runtime deployment is per-device and does not require the system
         # partition or an init entry. This also works on a clean device.
@@ -52,11 +54,11 @@ class ServerManager:
 
     def _refresh_resource_paths(self) -> None:
         """Refresh paths after a device or packaged resource profile changes."""
-        self.resource_profile = get_runtime_resource_profile(self.manufacturer)
+        self.resource_profile = get_runtime_resource_profile(self.manufacturer, self.product_name)
         self.server_exe_file = self._get_resource_path("ohscrcpy_server", self.resource_profile)
         self.server_cfg_file = self._get_resource_path(
             "ohscrcpy_server.cfg",
-            self.resource_profile if self.resource_profile == "Dnakeiot" else "default",
+            self.resource_profile if self.resource_profile in DNAKEIOT_FAMILY else "default",
         )
     
     def _get_resource_path(self, filename: str, manufacturer: str = "default") -> str:
@@ -74,13 +76,14 @@ class ServerManager:
                 file_path = os.path.join(manu_path, filename)
                 if os.path.isfile(file_path):
                     base_path = os.path.join(base_path, manufacturer)
-                elif manufacturer == "Dnakeiot":
+                elif manufacturer in DNAKEIOT_FAMILY:
+                    # 开发环境回退到仓库 Server/bin/<profile>/ 下的受管资源
                     source_resource = os.path.join(
                         os.path.dirname(base_path), "Server", "bin", manufacturer, filename)
                     if not hasattr(sys, '_MEIPASS') and os.path.isfile(source_resource):
                         return source_resource
                     print_log(LogLevel.ERROR, self.log_title,
-                              f"缺少 Dnakeiot AArch64 服务端资源: {file_path}")
+                              f"缺少 {manufacturer} AArch64 服务端资源: {file_path}")
                     return file_path
             
             server_path = os.path.join(base_path, filename)
@@ -90,9 +93,11 @@ class ServerManager:
             print_log(LogLevel.ERROR, self.log_title, f"获取资源路径失败: {e}")
             return filename
     
-    def update_manufacturer(self, manufacturer: str) -> None:
-        """更新设备制造商信息"""
+    def update_manufacturer(self, manufacturer: str, product_name: str = "") -> None:
+        """更新设备制造商与产品信息"""
         self.manufacturer = manufacturer
+        if product_name:
+            self.product_name = product_name
         self._refresh_resource_paths()
 
     def _get_server_manifest(self) -> Optional[dict]:
@@ -143,8 +148,9 @@ class ServerManager:
 
         manifest = self._get_server_manifest()
         if manifest is None:
-            if self.resource_profile == "Dnakeiot":
-                print_log(LogLevel.ERROR, self.log_title, "Dnakeiot 服务端缺少 manifest")
+            if self.resource_profile in DNAKEIOT_FAMILY:
+                print_log(LogLevel.ERROR, self.log_title,
+                          f"{self.resource_profile} 服务端缺少 manifest")
                 return False
             return True
 
@@ -184,10 +190,33 @@ class ServerManager:
         match = re.search(r"\b([0-9a-fA-F]{64})\b", output)
         return match.group(1).lower() if match else None
     
+    def check_device_abi(self) -> bool:
+        """确认设备为64位镜像（OHScrcpy 64位版本仅支持64位镜像设备）。
+
+        动态加载器位置随镜像不同：优先 /lib（本厂商 v9611/6.1 镜像），
+        其次 /system/lib64（musl 动态链接标准布局）。
+        """
+        print_log(LogLevel.INFO, self.log_title, "检查设备 ABI（要求 64 位镜像）...")
+        if self.hdc.check_file_exists("/lib/ld-musl-aarch64.so.1") or \
+                self.hdc.check_file_exists("/system/lib64/ld-musl-aarch64.so.1"):
+            print_log(LogLevel.INFO, self.log_title, "设备为 64 位镜像，ABI 检查通过")
+            return True
+        if self.hdc.check_file_exists("/lib/ld-musl-arm.so.1") or \
+                self.hdc.check_file_exists("/system/lib/ld-musl-arm.so.1"):
+            print_log(LogLevel.FATAL, self.log_title,
+                      "设备为 32 位镜像：OHScrcpy 已停止 32 位支持，请将设备升级为 64 位镜像")
+            return False
+        print_log(LogLevel.ERROR, self.log_title,
+                  "无法确认设备 ABI（未找到 64/32 位动态加载器），已中止部署")
+        return False
+
     def install_server(self) -> bool:
         """安装服务端"""
         print_log(LogLevel.INFO, self.log_title, f"开始安装...")
-        
+
+        if not self.check_device_abi():
+            return False
+
         if not self._validate_local_server_resource():
             return False
         
@@ -267,10 +296,10 @@ class ServerManager:
     
     def start_server(self, port: int) -> bool:
         """启动服务端"""
-        if self.resource_profile == "Dnakeiot" and self._is_runtime_server_running(port):
+        if self.resource_profile in DNAKEIOT_FAMILY and self._is_runtime_server_running(port):
             print_log(LogLevel.INFO, self.log_title, f"运行时服务已监听端口: {port}")
             return True
-        if self.resource_profile != "Dnakeiot" and self.check_server_running(port=port):
+        if self.resource_profile not in DNAKEIOT_FAMILY and self.check_server_running(port=port):
             print_log(LogLevel.INFO, self.log_title, f"服务已监听端口: {port}")
             return True
 
