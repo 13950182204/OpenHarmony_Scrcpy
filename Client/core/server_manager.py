@@ -85,6 +85,22 @@ class ServerManager:
                     print_log(LogLevel.ERROR, self.log_title,
                               f"缺少 {manufacturer} AArch64 服务端资源: {file_path}")
                     return file_path
+                else:
+                    # 未知厂商：回退到通用 64 位资源（标准 OH_VideoEncoder，无厂商依赖）
+                    generic_file = os.path.join(base_path, "Dnakeiot_RK3568", filename)
+                    if os.path.isfile(generic_file):
+                        print_log(LogLevel.WARN, self.log_title,
+                                  f"未找到 {manufacturer} 专用资源，回退通用 64 位资源: {generic_file}")
+                        return generic_file
+                    source_generic = os.path.join(
+                        os.path.dirname(base_path), "Server", "bin", "Dnakeiot_RK3568", filename)
+                    if not hasattr(sys, '_MEIPASS') and os.path.isfile(source_generic):
+                        print_log(LogLevel.WARN, self.log_title,
+                                  f"未找到 {manufacturer} 专用资源，回退通用 64 位资源: {source_generic}")
+                        return source_generic
+                    print_log(LogLevel.ERROR, self.log_title,
+                              f"缺少 {manufacturer} 专用资源且无通用 64 位资源: {file_path}")
+                    return file_path
             
             server_path = os.path.join(base_path, filename)
             print_log(LogLevel.DEBUG, self.log_title, f"待安装服务端可执行文件路径: {server_path}")

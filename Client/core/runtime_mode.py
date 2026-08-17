@@ -34,6 +34,10 @@ def get_runtime_resource_profile(manufacturer: str, product_name: str = "") -> s
 
     Dnakeiot 设备按产品名区分：RK3568 开发板走通用编码（H.264/H.265 由媒体服务
     协商），A333 走 CedarC 硬编。资源目录名即 profile 名（打包于 _internal/<profile>/）。
+
+    公版/未配置厂商参数的设备（manufacturer 为 default/unknown/空白）没有厂商私有
+    依赖，统一使用通用 64 位编码资源（Dnakeiot_RK3568 即标准 OH_VideoEncoder，
+    不依赖 libawcodec_enc 等厂商库，可直接复用）。
     """
     if is_a333_temporary_mode():
         return "Dnakeiot"
@@ -41,4 +45,6 @@ def get_runtime_resource_profile(manufacturer: str, product_name: str = "") -> s
         if "RK3568" in product_name:
             return "Dnakeiot_RK3568"
         return "Dnakeiot"
+    if not manufacturer or manufacturer.strip().lower() in ("default", "unknown"):
+        return "Dnakeiot_RK3568"
     return manufacturer
