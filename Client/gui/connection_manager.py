@@ -85,18 +85,18 @@ class ConnectionManager:
         if self._server_manager is None:
             self._server_manager = server_manager
         else:
-            # 复用已有实例，只更新 manufacturer/product
+            # 复用已有实例，只更新 manufacturer/build_product
             self._server_manager.update_manufacturer(server_manager.manufacturer,
-                                                      server_manager.product_name)
+                                                      server_manager.build_product)
     
     def ensure_server_manager(self, manufacturer: str, hdc_executor: HDCCommandExecutor,
-                              product_name: str = "") -> None:
+                              build_product: str = "") -> None:
         """确保服务端管理器存在（复用或创建）"""
         if self._server_manager is None:
             from core.server_manager import ServerManager
-            self._server_manager = ServerManager(manufacturer, hdc_executor, product_name=product_name)
+            self._server_manager = ServerManager(manufacturer, hdc_executor, build_product=build_product)
         else:
-            self._server_manager.update_manufacturer(manufacturer, product_name)
+            self._server_manager.update_manufacturer(manufacturer, build_product)
     
     def connect(self, port: int) -> bool:
         """同步连接设备（返回是否成功）"""

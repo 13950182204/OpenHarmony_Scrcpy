@@ -39,11 +39,11 @@ class ServerManager:
     """服务端管理器"""
     
     def __init__(self, manufacturer: str, hdc_executor: HDCCommandExecutor,
-                 product_name: str = "") -> None:
+                 build_product: str = "") -> None:
         self.hdc = hdc_executor
         self.server_process: Optional[subprocess.Popen] = None
         self.manufacturer = manufacturer
-        self.product_name = product_name
+        self.build_product = build_product
         self.log_title = "服务端管理器"
         # Runtime deployment is per-device and does not require the system
         # partition or an init entry. This also works on a clean device.
@@ -54,7 +54,7 @@ class ServerManager:
 
     def _refresh_resource_paths(self) -> None:
         """Refresh paths after a device or packaged resource profile changes."""
-        self.resource_profile = get_runtime_resource_profile(self.manufacturer, self.product_name)
+        self.resource_profile = get_runtime_resource_profile(self.manufacturer, self.build_product)
         self.server_exe_file = self._get_resource_path("ohscrcpy_server", self.resource_profile)
         self.server_cfg_file = self._get_resource_path(
             "ohscrcpy_server.cfg",
@@ -109,11 +109,11 @@ class ServerManager:
             print_log(LogLevel.ERROR, self.log_title, f"获取资源路径失败: {e}")
             return filename
     
-    def update_manufacturer(self, manufacturer: str, product_name: str = "") -> None:
-        """更新设备制造商与产品信息"""
+    def update_manufacturer(self, manufacturer: str, build_product: str = "") -> None:
+        """更新设备制造商与构建产品信息"""
         self.manufacturer = manufacturer
-        if product_name:
-            self.product_name = product_name
+        if build_product:
+            self.build_product = build_product
         self._refresh_resource_paths()
 
     def _get_server_manifest(self) -> Optional[dict]:
