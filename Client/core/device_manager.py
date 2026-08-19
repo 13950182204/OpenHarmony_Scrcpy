@@ -126,11 +126,12 @@ class DeviceManager:
             return -1
         
         output_result = result["stdout"]
-        # The A333 runtime server must stay off DEFAULT_PORT because an
-        # init-managed legacy service can reclaim that port mid-session.
+        # A333（76A/76B）与 RK3568（769）镜像均有 init 托管的 27183 旧服务，
+        # 运行时服务必须避开 DEFAULT_PORT；识别完全以 const.build.product 为准。
+        build_product = (self.current_device.build_product or "").strip()
         uses_a333_runtime = (
             is_a333_temporary_mode()
-            or self.current_device.manufacturer == "Dnakeiot"
+            or build_product.upper() in ("76A", "76B", "769")
         )
         port = DEFAULT_PORT + 1 if uses_a333_runtime else DEFAULT_PORT
         device_listening = ""

@@ -55,11 +55,11 @@ class ServerManager:
     def _refresh_resource_paths(self) -> None:
         """Refresh paths after a device or packaged resource profile changes."""
         self.resource_profile = get_runtime_resource_profile(self.manufacturer, self.build_product)
+        # 二进制与 cfg 必须取自同一资源目录（_get_resource_path 对缺失目录有
+        # 通用 64 位兜底）；此前 cfg 走 "default" 路径在打包环境下不存在，
+        # 导致 SHA-256 校验 actual=None 而部署失败。
         self.server_exe_file = self._get_resource_path("ohscrcpy_server", self.resource_profile)
-        self.server_cfg_file = self._get_resource_path(
-            "ohscrcpy_server.cfg",
-            self.resource_profile if self.resource_profile in DNAKEIOT_FAMILY else "default",
-        )
+        self.server_cfg_file = self._get_resource_path("ohscrcpy_server.cfg", self.resource_profile)
     
     def _get_resource_path(self, filename: str, manufacturer: str = "default") -> str:
         """获取资源文件的正确路径（支持PyInstaller打包）"""
