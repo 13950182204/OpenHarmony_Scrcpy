@@ -60,7 +60,7 @@ The old `Release\OHScrcpy-A333-Dnakeiot\OHScrcpy.exe` must not be reused. Its de
 
 ## WSL Boundary
 
-The WSL environment can edit `D:\` through `/mnt/d`, but it has no `cmd.exe`, `powershell.exe`, Windows Python, or Windows PyInstaller runtime. PyInstaller is host-specific: executing it in WSL would create a Linux ELF executable, not `OHScrcpy.exe`. Therefore the source and service resource are prepared from WSL, while the final `.exe` must be built by a Windows-host Codex/session using the batch file above.
+PyInstaller is host-specific: using Linux Python would create a Linux ELF executable, not `OHScrcpy.exe`. On this WSL host, Windows Python and PyInstaller are available through `/init /mnt/c/Windows/System32/cmd.exe`; the batch file may therefore be run through that bridge. A host without that bridge must build from a Windows Command Prompt instead.
 
 ## Background
 
@@ -96,11 +96,11 @@ The original A333-only build (`build_dnakeiot_a333_windows.bat`) is unchanged.
 
 ### What changed in the client
 
-- `Client/core/device_manager.py`: `DeviceInfo` now carries `product_name` (`const.product.name`) and
-  `create_server_manager` forwards it.
-- `Client/core/runtime_mode.py`: `get_runtime_resource_profile(manufacturer, product_name)` —
-  Dnakeiot + product containing `RK3568` resolves to `Dnakeiot_RK3568`; new `dnakeiot_combined_mode.flag`
-  marker (checked at `_internal` root) selects the combined version string.
+- `Client/core/device_manager.py`: `DeviceInfo` carries `build_product` from `const.build.product` and
+  forwards it when creating `ServerManager`.
+- `Client/core/runtime_mode.py`: `get_runtime_resource_profile(manufacturer, build_product)` selects
+  `Dnakeiot` for `76A`/`76B`, `Dnakeiot_RK3568` for `769` and the generic 64-bit profile for other products;
+  `dnakeiot_combined_mode.flag` (checked at `_internal` root) selects the combined version string.
 - `Client/core/server_manager.py`: profile-aware resource lookup (packaged `_internal/<profile>/`,
   dev fallback `Server/bin/<profile>/`), Dnakeiot-family runtime-port behavior for both profiles,
   plus `check_device_abi()`: probes `/lib/ld-musl-aarch64.so.1` then `/system/lib64/` before any
@@ -132,3 +132,22 @@ pass for both profiles (resource selection, manifest SHA-256 validation, device 
    `SCREEN_INFO:800:1280:...`, H.265 hardware encode, FPS ~60.
 3. Window title shows `v2.4.0-dnakeiot`; client log includes post-deployment device SHA-256
    verification before connecting.
+
+## SHA-256 Diagnostic Release (2026-09-08)
+
+`Release\OHScrcpy-Dnakeiot\OHScrcpy.exe` was rebuilt from commit `df82a48` with Windows Python 3.8 and
+PyInstaller 6.22.0. Its SHA-256 is
+`7562c37f74969c4113a8d7197056ba59cd5ba3ce8764df93aba3c2b917ee427e`.
+
+The release keeps `_internal\Dnakeiot\ohscrcpy_server` SHA-256
+`e9b825992a2b49e029e6e4af79107c91f20b5f7ab099b8fefc8f5648cea75fca` and cfg SHA-256
+`6a63d4d1a5d7897f808641da1c44da164878d73ecf58c7646b1adae360f8a469`, both matching its manifest.
+The client now accepts either `stdout` or `output` from an HDC result when parsing a remote SHA-256. If
+parsing still fails, it records the command status, return code, raw output and stderr instead of only
+reporting `binary=None, config=None`.
+
+On the currently connected 76A device `ea010e325333324247102b4ed1a48c99`, a clean runtime upload verified
+both device-side hashes, started `27184`, negotiated `672x1072@60/h264`, and decoded 672 frames with zero
+failures during a 12-second headless run. The test then removed the runtime files and HDC forwarding and
+restarted the init-managed service. This is not a 76B GUI acceptance: the original 76B device/package must
+still run this complete `onedir` directory, with `_internal` kept next to the exe, and retain the resulting log.
