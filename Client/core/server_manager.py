@@ -199,12 +199,23 @@ class ServerManager:
 
     def _get_remote_sha256(self, remote_path: str) -> Optional[str]:
         result = self.hdc.execute(["shell", "sha256sum", remote_path])
-        if not result.get("success"):
-            return None
+        # HDCCommandExecutor returns stdout, while some test/host wrappers
+        # expose the same stream as output. Parse both so a successful device
+        # hash is not discarded solely because of that result-shape mismatch.
+        outputs = (result.get("stdout", ""), result.get("output", ""))
+        for output in outputs:
+            match = re.search(r"\b([0-9a-fA-F]{64})\b", str(output))
+            if match:
+                return match.group(1).lower()
 
-        output = result.get("stdout", "")
-        match = re.search(r"\b([0-9a-fA-F]{64})\b", output)
-        return match.group(1).lower() if match else None
+        status = result.get("returncode", "unknown")
+        stderr = str(result.get("stderr", result.get("error", ""))).strip()
+        observed = " | ".join(str(output).strip() for output in outputs if output).strip()
+        print_log(LogLevel.WARN, self.log_title,
+                  f"读取设备端 SHA-256 失败: path={remote_path}, "
+                  f"success={result.get('success')}, returncode={status}, "
+                  f"stdout={observed[:300]!r}, stderr={stderr[:300]!r}")
+        return None
     
     def check_device_abi(self) -> bool:
         """确认设备为64位镜像（OHScrcpy 64位版本仅支持64位镜像设备）。

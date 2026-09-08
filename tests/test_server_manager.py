@@ -143,6 +143,26 @@ class TestServerManager:
 
         assert server_manager.check_server_installed() is False
 
+    def test_remote_sha256_accepts_output_field_from_hdc_wrapper(self, server_manager, mock_hdc):
+        expected = "a" * 64
+        mock_hdc.execute.return_value = {
+            "success": True,
+            "output": f"{expected}  /data/local/tmp/ohscrcpy_server",
+            "stderr": "",
+        }
+
+        assert server_manager._get_remote_sha256("/data/local/tmp/ohscrcpy_server") == expected
+
+    def test_remote_sha256_returns_none_when_hdc_has_no_digest(self, server_manager, mock_hdc):
+        mock_hdc.execute.return_value = {
+            "success": False,
+            "stdout": "sha256sum: No such file or directory",
+            "stderr": "",
+            "returncode": 1,
+        }
+
+        assert server_manager._get_remote_sha256("/data/local/tmp/missing") is None
+
     def test_runtime_deployment_uses_data_partition(self, server_manager):
         assert server_manager.remote_server_path == "/data/local/tmp/ohscrcpy_server"
         assert server_manager.remote_config_path == "/data/local/tmp/ohscrcpy_server.cfg"
