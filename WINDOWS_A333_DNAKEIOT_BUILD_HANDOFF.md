@@ -151,3 +151,6 @@ both device-side hashes, started `27184`, negotiated `672x1072@60/h264`, and dec
 failures during a 12-second headless run. The test then removed the runtime files and HDC forwarding and
 restarted the init-managed service. This is not a 76B GUI acceptance: the original 76B device/package must
 still run this complete `onedir` directory, with `_internal` kept next to the exe, and retain the resulting log.
+
+The source regression suite after aligning the device-property tests with the current `const.build.product`
+contract is `132 passed` (four Pillow deprecation warnings only).

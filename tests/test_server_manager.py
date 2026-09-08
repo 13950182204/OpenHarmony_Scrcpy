@@ -237,7 +237,7 @@ class TestServerManufacturerHandling:
         resource.write_bytes(b"server")
 
         with patch('os.path.abspath', return_value=str(core_dir / "server_manager.py")):
-            manager = ServerManager(manufacturer="Dnakeiot", hdc_executor=mock_hdc)
+            manager = ServerManager(manufacturer="Dnakeiot", hdc_executor=mock_hdc, build_product="76A")
 
         assert manager.server_exe_file == str(resource)
 

@@ -71,8 +71,10 @@ class TestDeviceManager:
             {"success": True, "stdout": "device_sn_1\ndevice_sn_2"},
             {"success": True, "stdout": "model1"},
             {"success": True, "stdout": "HUAWEI"},
+            {"success": True, "stdout": "76A"},
             {"success": True, "stdout": "model2"},
             {"success": True, "stdout": "default"},
+            {"success": True, "stdout": "769"},
         ]
         
         mock_hdc = Mock()
@@ -130,7 +132,7 @@ class TestDeviceManager:
             {"success": True, "stdout": ""},
         ]
         manager = DeviceManager(hdc)
-        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot")
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot", build_product="76A")
 
         assert manager.get_port_forwarding() == 27184
 
@@ -141,7 +143,7 @@ class TestDeviceManager:
             {"success": True, "stdout": "tcp 0 0 0.0.0.0:27184 0.0.0.0:* LISTEN"},
         ]
         manager = DeviceManager(hdc)
-        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot")
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="Dnakeiot", build_product="76A")
 
         assert manager.get_port_forwarding() == 27185
 
