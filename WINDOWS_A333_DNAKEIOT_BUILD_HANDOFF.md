@@ -413,3 +413,12 @@ SCREEN_INFO:1024:600:60:1500000:h264:input-v1:rot=90
 | `150100…` | logical=1280x800 physical=800x1280 rotation=3 | `rot=0`，编码 1280x800 | 1280x800 正向，客户端不再叠加自身旋转 |
 
 单测：`python3 -m pytest tests -q` → 186 passed。
+
+## 单文件发布包（onefile，2026-10-28）
+
+- 构建脚本：`Package/build_dnakeiot_onefile_windows.bat`。与 onedir 版共用 `Package/A333_Dnakeiot_Staging` 与全部 `--add-data`（Dnakeiot、Dnakeiot_RK3568、hdc、libusb_shared.dll、bin、config），唯一差异是 PyInstaller 的 `--onefile`；产物复制到 `Release/OHScrcpy-Dnakeiot-Single/OHScrcpy.exe` 并用 certutil 生成 `.sha256`。
+- 实测产物：53635836 字节（约 51.2 MiB），sha256 `ef391cbcaf7631c81d4ab7cc4239827db67a1aad50c8b1d5249f5c98fd47a3cd`。
+- 运行时 PyInstaller 先自解包到 `%TEMP%\_MEIxxxxxx`，从双击到窗口出现比 onedir 多 3~8 秒；退出后该目录自动清理。不要在 U 盘/网络盘直接运行。
+- 解包内容校验：`Dnakeiot/ohscrcpy_server` = `5fe999f330e92ceabab647c373caf237e1dbbdba7caec06ff09708182cf67d38`，`bin/arm64/mmi_touchd` = `f24e9896bf1e866f23e9333c7a3247291977430673633369b521da4956cb426a`，与仓库源文件一致。
+- 真机验证（`150100424a5444345206517525298929`，1280x800 横屏）：点击[连接]后 `连接成功！分辨率: 1280x800`、`FPS: 65`、解码 900 帧失败 0，触控守护进程就绪（端口 27197）。
+- 注意：GUI 启动后只做「预安装」（启动服务端、等用户点[连接]），这是既有行为，不是卡死；日志停在 `启动成功` 属于正常等待状态。
