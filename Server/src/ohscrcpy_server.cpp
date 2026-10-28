@@ -138,6 +138,10 @@ struct ScreenInfo {
     int32_t bitrate = DEFAULT_BITRATE;
     uint64_t displayid = 0;
     std::string codec = "h264";
+    // Degrees the captured raw buffer has to be rotated before encoding:
+    // 0, 90, 180 or 270. Non-zero only when ScreenCapture hands back the
+    // unrotated panel framebuffer (see GetDisplayRotationDegrees).
+    int32_t rotateDegrees = 0;
 };
 
 // 命令行参数结构
@@ -859,19 +863,6 @@ public:
         return true;
     }
 
-#ifdef OHSCRCPY_USE_CEDARC
-    static void normalizeCedarcCaptureOrientation(ScreenInfo& screenInfo) {
-        // The A333 panel is physically portrait. RenderService may expose a
-        // landscape virtual screen after a rotation, which is not a valid
-        // capture canvas for the Cedarc raw-buffer path.
-        if (screenInfo.width > screenInfo.height) {
-            const int32_t width = screenInfo.width;
-            screenInfo.width = screenInfo.height;
-            screenInfo.height = width;
-        }
-    }
-#endif
-
     void resetVideoOutput(uint64_t displayId, int32_t width, int32_t height) {
         if (displayId != screen_info_.displayid) {
             return;
@@ -883,9 +874,9 @@ public:
         nextScreenInfo.fps = DEFAULT_FPS;
         nextScreenInfo.bitrate = DEFAULT_BITRATE;
         nextScreenInfo.codec = "h264";
+        nextScreenInfo.rotateDegrees = GetDisplayRotationDegrees();
 
 #ifdef OHSCRCPY_USE_CEDARC
-        normalizeCedarcCaptureOrientation(nextScreenInfo);
         selectCedarcResolution(nextScreenInfo);
 #endif
 
@@ -1080,16 +1071,13 @@ void applyCodecConfig(ScreenInfo& screenInfo, const StandardResolution& res,
 
 #ifdef OHSCRCPY_USE_CEDARC
     void selectCedarcResolution(ScreenInfo& screenInfo) {
-        // The A333 AVC block accepts a maximum coded height of 1088. Keep the
-        // portrait canvas rather than rotating it into a wider virtual screen.
-        const int32_t originalWidth = screenInfo.width;
-        const int32_t originalHeight = screenInfo.height;
-        if (screenInfo.height > 1088) {
-            screenInfo.width = 672;
-            screenInfo.height = 1072;
-            screenInfo.bitrate = adjustBitrateByResolution(screenInfo.bitrate, originalWidth, originalHeight,
-                screenInfo.width, screenInfo.height);
-        }
+        // Keep the native display canvas. Earlier builds assumed the A333 AVC
+        // block capped the coded height at 1088 and hard-scaled anything taller
+        // to 672x1072, which blurred 800x1280 panels. A capability probe on the
+        // A537 showed VideoEncInit accepts the native sizes (verified from
+        // 600x1024 up to 1600x2560), so no forced downscale is needed.
+        // Cedarc still scales the raw capture to screenInfo if they ever differ.
+        (void)0;
         screenInfo.codec = "h264";
         LOG_INFO(LOG_TAG, "Cedarc raw-buffer config: " + std::to_string(screenInfo.width) + "x" +
             std::to_string(screenInfo.height));
@@ -1161,6 +1149,26 @@ private:
         return true;
     }
 
+    // ScreenCapture on some panels returns the raw, unrotated framebuffer while
+    // others hand back the composited (rotated) frame. Displays that report a
+    // physical geometry get rotated by the capture path; panels without one
+    // (GetPhysicalWidth() == 0) have to be rotated here before encoding.
+    static int32_t GetDisplayRotationDegrees() {
+        auto display = DisplayManager::GetInstance().GetDefaultDisplay();
+        if (display == nullptr) {
+            return 0;
+        }
+        if (display->GetPhysicalWidth() > 0 && display->GetPhysicalHeight() > 0) {
+            return 0;
+        }
+        switch (static_cast<int32_t>(display->GetRotation())) {
+            case 1: return 90;
+            case 2: return 180;
+            case 3: return 270;
+            default: return 0;
+        }
+    }
+
     bool getPrimaryScreenInfo(ScreenInfo &info) {
         auto display = DisplayManager::GetInstance().GetDefaultDisplay();
         if (display == nullptr) {
@@ -1168,11 +1176,17 @@ private:
             return false;
         }
         
+        // DisplayManager already returns the size of the current rotation, so
+        // the stream keeps the user-visible orientation instead of the physical
+        // panel orientation.
         info.width = display->GetWidth();
         info.height = display->GetHeight();
-#ifdef OHSCRCPY_USE_CEDARC
-        normalizeCedarcCaptureOrientation(info);
-#endif
+        info.rotateDegrees = GetDisplayRotationDegrees();
+        LOG_INFO(LOG_TAG, "Display geometry: logical=" + std::to_string(info.width) + "x" +
+            std::to_string(info.height) + " physical=" + std::to_string(display->GetPhysicalWidth()) + "x" +
+            std::to_string(display->GetPhysicalHeight()) + " rotation=" +
+            std::to_string(static_cast<int32_t>(display->GetRotation())) + " rotateDegrees=" +
+            std::to_string(info.rotateDegrees) + " refresh=" + std::to_string(display->GetRefreshRate()));
         info.fps = DEFAULT_FPS;
         info.bitrate = DEFAULT_BITRATE;
         info.codec = "h264";
@@ -1225,6 +1239,9 @@ private:
         codecConfig.fps = screen_info_.fps;
         codecConfig.bitrate = screen_info_.bitrate;
         codecConfig.codec = screen_info_.codec;
+#ifdef OHSCRCPY_USE_CEDARC
+        codecConfig.rotateDegrees = screen_info_.rotateDegrees;
+#endif
         
         stream_context_->streamer = &network_;
         stream_context_->screen_info = screen_info_;
@@ -1243,21 +1260,26 @@ private:
         
         CaptureConfig captureConfig;
 #ifdef OHSCRCPY_USE_CEDARC
-        // The A333 encoder accepts a 672x1072 AVC output, but ScreenCapture
-        // interprets its dimensions as a crop canvas. Capture the complete
-        // primary display and let Cedarc scale it to screen_info_ instead.
+        // ScreenCapture hands back whatever orientation the panel actually
+        // renders. When the capture path already applies the display rotation
+        // (rotateDegrees == 0) the logical size is the right canvas. Otherwise
+        // the raw framebuffer is sideways, so the canvas is the swapped logical
+        // size and the encoder rotates the pixels back before coding them.
         ScreenInfo captureInfo;
         if (!getPrimaryScreenInfo(captureInfo)) {
             LOG_ERROR(LOG_TAG, "Get primary screen info for capture failed");
             encoder_.Destroy();
             return false;
         }
-        captureConfig.width = captureInfo.width;
-        captureConfig.height = captureInfo.height;
+        const bool swapCaptureCanvas =
+            (captureInfo.rotateDegrees == 90 || captureInfo.rotateDegrees == 270);
+        captureConfig.width = swapCaptureCanvas ? captureInfo.height : captureInfo.width;
+        captureConfig.height = swapCaptureCanvas ? captureInfo.width : captureInfo.height;
         captureConfig.fps = captureInfo.fps;
         captureConfig.displayId = captureInfo.displayid;
         LOG_INFO(LOG_TAG, "Cedarc capture source: " + std::to_string(captureConfig.width) + "x" +
-            std::to_string(captureConfig.height) + "; encoded stream: " +
+            std::to_string(captureConfig.height) + " rotateDegrees=" +
+            std::to_string(captureInfo.rotateDegrees) + "; encoded stream: " +
             std::to_string(screen_info_.width) + "x" + std::to_string(screen_info_.height));
 #else
         captureConfig.width = screen_info_.width;

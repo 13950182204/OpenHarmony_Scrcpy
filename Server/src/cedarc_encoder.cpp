@@ -60,6 +60,16 @@ std::string PlaneSummary(const OHScrcpy::CapturedFrame &frame)
     }
     return stream.str();
 }
+
+// Clockwise rotation requested by the caller, normalised to 0/90/180/270.
+int RotationOf(const OHScrcpy::CodecConfig &config)
+{
+    int rotation = config.rotateDegrees % 360;
+    if (rotation < 0) {
+        rotation += 360;
+    }
+    return rotation;
+}
 } // namespace
 
 namespace OHScrcpy {
@@ -233,7 +243,7 @@ void CedarcEncoder::ProcessFrame(const CapturedFrame &frame)
         ++dropped_frames_;
         return;
     }
-    if (frame.width != input_width_ || frame.height != input_height_ || frame.format != source_format_) {
+    if (frame.width != source_width_ || frame.height != source_height_ || frame.format != source_format_) {
         LOG_ERROR(LOG_TAG, "Captured buffer configuration changed after Cedarc initialization; dropping frame");
         ++dropped_frames_;
         return;
@@ -252,6 +262,12 @@ void CedarcEncoder::ProcessFrame(const CapturedFrame &frame)
     FrameLayout layout;
     int cedarcFormat = 0;
     if (!MapFrameFormat(frame, layout, cedarcFormat)) {
+        ReturnOneAllocInputBuffer(encoder_, &input);
+        ++dropped_frames_;
+        return;
+    }
+    if (layout != FrameLayout::PACKED_4 && RotationOf(config_) != 0) {
+        LOG_ERROR(LOG_TAG, "Rotated capture requires a packed RGBA buffer; frame dropped");
         ReturnOneAllocInputBuffer(encoder_, &input);
         ++dropped_frames_;
         return;
@@ -300,8 +316,11 @@ bool CedarcEncoder::InitializeForFrame(const CapturedFrame &frame)
     if (!MapFrameFormat(frame, layout, cedarcFormat)) {
         return false;
     }
-    input_width_ = frame.width;
-    input_height_ = frame.height;
+    source_width_ = frame.width;
+    source_height_ = frame.height;
+    const bool swapInput = (RotationOf(config_) == 90 || RotationOf(config_) == 270);
+    input_width_ = swapInput ? frame.height : frame.width;
+    input_height_ = swapInput ? frame.width : frame.height;
     aligned_width_ = Align16(input_width_);
     aligned_height_ = Align16(input_height_);
     source_format_ = frame.format;
@@ -310,7 +329,8 @@ bool CedarcEncoder::InitializeForFrame(const CapturedFrame &frame)
     message << "First capture buffer: format=" << frame.format << " width=" << frame.width
             << " height=" << frame.height << " stride=" << frame.stride
             << " planes=" << frame.plane_count << " fd=" << frame.fd
-            << " seq=" << frame.sequence << " source_layout=" << static_cast<int>(layout)
+            << " seq=" << frame.sequence << " rotateDegrees=" << RotationOf(config_)
+            << " source_layout=" << static_cast<int>(layout)
             << " cedarc_format=" << cedarcFormat
             << " plane_info=[" << PlaneSummary(frame) << "]";
     LOG_INFO(LOG_TAG, message.str());
@@ -484,16 +504,49 @@ bool CedarcEncoder::CopyPackedFrame(const CapturedFrame &frame, void *inputPtr) 
 {
     const auto *input = static_cast<const VencInputBuffer *>(inputPtr);
     const uint32_t sourceStride = frame.planes[0].row_stride;
-    const size_t bytesPerRow = static_cast<size_t>(frame.width) * 4;
+    const size_t sourceBytesPerRow = static_cast<size_t>(frame.width) * 4;
     if (frame.data == nullptr || input == nullptr || input->pAddrVirY == nullptr ||
-        sourceStride < bytesPerRow) {
+        sourceStride < sourceBytesPerRow) {
         LOG_ERROR(LOG_TAG, "Packed capture metadata is invalid for Cedarc input");
         return false;
     }
     const size_t destinationStride = static_cast<size_t>(aligned_width_) * 4;
-    for (int row = 0; row < frame.height; ++row) {
-        std::memcpy(input->pAddrVirY + static_cast<size_t>(row) * destinationStride,
-            frame.data + static_cast<size_t>(row) * sourceStride, bytesPerRow);
+    const int rotation = RotationOf(config_);
+    if (rotation == 0) {
+        for (int row = 0; row < frame.height; ++row) {
+            std::memcpy(input->pAddrVirY + static_cast<size_t>(row) * destinationStride,
+                frame.data + static_cast<size_t>(row) * sourceStride, sourceBytesPerRow);
+        }
+        return true;
+    }
+
+    // Rotate one pixel at a time. Destination (x, y) reads the source pixel that
+    // ends up there after the clockwise rotation:
+    //   90  -> (y, height - 1 - x)
+    //   180 -> (width - 1 - x, height - 1 - y)
+    //   270 -> (width - 1 - y, x)
+    const auto *source = frame.data;
+    auto *destination = input->pAddrVirY;
+    const size_t sourcePixelsPerRow = static_cast<size_t>(sourceStride) / 4;
+    for (int y = 0; y < input_height_; ++y) {
+        auto *destinationRow = destination + static_cast<size_t>(y) * destinationStride;
+        for (int x = 0; x < input_width_; ++x) {
+            int sourceX;
+            int sourceY;
+            if (rotation == 90) {
+                sourceX = y;
+                sourceY = frame.height - 1 - x;
+            } else if (rotation == 180) {
+                sourceX = frame.width - 1 - x;
+                sourceY = frame.height - 1 - y;
+            } else {
+                sourceX = frame.width - 1 - y;
+                sourceY = x;
+            }
+            const size_t sourceOffset = (static_cast<size_t>(sourceY) * sourcePixelsPerRow +
+                static_cast<size_t>(sourceX)) * 4;
+            std::memcpy(destinationRow + static_cast<size_t>(x) * 4, source + sourceOffset, 4);
+        }
     }
     return true;
 }
@@ -571,6 +624,10 @@ void CedarcEncoder::ReleaseEncoder()
     }
     aligned_width_ = 0;
     aligned_height_ = 0;
+    input_width_ = 0;
+    input_height_ = 0;
+    source_width_ = 0;
+    source_height_ = 0;
     source_format_ = 0;
     next_pts_us_ = 0;
 }

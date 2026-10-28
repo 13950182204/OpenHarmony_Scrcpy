@@ -17,6 +17,9 @@ Package/A333_Dnakeiot_Staging/
 Package/A333_Temporary_Staging/
 Release/
 
+# CROSS BUILD OUTPUT
+.build_out/
+
 # LOG
 logs/
 verification/

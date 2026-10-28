@@ -309,3 +309,55 @@ launcher 的点击识别直接判成长按。
 3. 事件字段以系统 `/bin/uinput` 为基准对齐：它能正常点击，就照它的字段集合写。
 4. 用 `snapshot_display -f` 截图闭环验证，不要只看 socket 返回的 `ok`。
 
+
+
+## Native Resolution And Rotation (2026-10-28)
+
+### 问题
+
+全志 CedarC 服务端把高屏硬缩到 672x1072：`selectCedarcResolution()` 假定
+"A333 AVC 最大编码高度 1088"，800x1280 面板因此被降采样（且宽高比轻微变形）。
+同时 A537 面板（600x1024）在横屏时画面旋转 90°、右侧大片黑边。
+
+### 根因
+
+1. **1088 上限是错的**：能力探针（`VENC_CODEC_H264` + `VencBaseConfig` + `VideoEncInit`）
+   在设备上实测 600x1024 / 800x1280 / 1080x1920 / 1600x2560 全部 `init=0`，
+   该常量只出现在 `vencoderDemo/v1/EncoderTest.c` 的可选尺寸列表里，并非硬限制。
+2. **旋转不是所有面板一致**：
+   - 上报物理尺寸的面板（`GetPhysicalWidth() > 0`，如 800x1280 设备）：
+     ScreenCapture 已按当前旋转返回合成后的帧，画布用逻辑尺寸即可。
+   - 不上报物理尺寸的面板（`physical=0x0`，如 A537）：ScreenCapture 返回**未旋转的原始
+     帧缓冲**，必须自己在编码前旋转。
+
+### 实现
+
+- `ScreenInfo` 增加 `rotateDegrees`（0/90/180/270），由
+  `GetDisplayRotationDegrees()` 决定：物理尺寸有效则 0，否则把 `GetRotation()`
+  的 0/1/2/3 映射为 0/90/180/270。
+- `initStreaming()`：90/270 时捕获画布取逻辑尺寸的交换值（A537 横屏 → 请求 600x1024），
+  180 保持逻辑尺寸；`CodecConfig.rotateDegrees` 传给编码器。
+- `CedarcEncoder::InitializeForFrame()` 用旋转后的尺寸作为编码输入
+  （`nInputWidth/nInputHeight`），`CopyPackedFrame()` 在 `rotateDegrees != 0` 时逐像素
+  顺时针旋转（90: `(y, h-1-x)`，180: `(w-1-x, h-1-y)`，270: `(w-1-y, x)`）；
+  YUV 布局遇到旋转会记错误并丢帧（OH 该路径只给 RGBA/format=12）。
+- 采集侧仍是完整显示尺寸，`SCREEN_INFO`/码流始终是用户可见方向。
+
+### 实测（v2.4.4 构建，sha256 `b6aeaa64a51d2dab8180740538e473766dbbb446dd2059f2cfc1a51739e74a20`）
+
+| 设备 | 面板 | 几何 | 结果 |
+| --- | --- | --- | --- |
+| `150100424a5444345206517525298929` | 800x1280 | logical=1280x800 physical=800x1280 rotation=3 rotateDegrees=0 | `SCREEN_INFO 1280:800`，解码帧 1280x800 正向、与 `snapshot_display` 一致 |
+| `ea010e325333324247102b4f80429c69` | 600x1024 | logical=1024x600 physical=0x0 rotation=1 rotateDegrees=90 | 捕获 600x1024、编码 1024x600，解码帧正向 launcher、无黑边 |
+
+两台设备 5 秒包统计均为约 60fps（`FRAME ~240`、`KEYFRAME 5`、SPS/PPS 各 1）。
+
+### 构建与安装
+
+```bash
+bash Server/build_ohscrcpy_server_cedarc.sh          # 产物写 .build_out/，不覆盖仓库二进制
+cp .build_out/ohscrcpy_server_cedarc Server/bin/Dnakeiot/ohscrcpy_server
+```
+
+装完必须同步 `Server/bin/Dnakeiot/server_manifest.json` 的 `sha256`（客户端
+`ServerManager._validate_local_server_resource()` 会校验），否则启动前即报资源无效。

@@ -37,6 +37,10 @@ struct CodecConfig {
     int fps;
     int bitrate;
     std::string codec;
+    // Degrees the captured buffer has to be rotated (clockwise) before it is
+    // handed to the encoder: 0, 90, 180 or 270. Frames arrive sideways on
+    // panels whose ScreenCapture does not apply the display rotation.
+    int rotateDegrees = 0;
 };
 
 // A333-only raw-frame H.264 backend using the Cedarc v2 allocation lifecycle.
@@ -90,6 +94,8 @@ private:
     int aligned_height_ = 0;
     int input_width_ = 0;
     int input_height_ = 0;
+    int source_width_ = 0;
+    int source_height_ = 0;
     int source_format_ = 0;
     int64_t next_pts_us_ = 0;
     uint64_t submitted_frames_ = 0;
