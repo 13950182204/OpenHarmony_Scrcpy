@@ -36,6 +36,7 @@ from .logger import print_log, set_log_file, get_log_file, init_logger, Logger
 from .hdc_executor import HDCCommandExecutor
 from .server_manager import ServerManager
 from .device_manager import DeviceInfo, DeviceManager
+from .touch_daemon import TouchDaemon
 from .exceptions import (
     OHScrcpyError,
     DeviceNotFoundError,
@@ -68,6 +69,7 @@ __all__ = [
     "ServerManager",
     "DeviceInfo",
     "DeviceManager",
+    "TouchDaemon",
     "OHScrcpyError",
     "DeviceNotFoundError",
     "StreamConnectError",

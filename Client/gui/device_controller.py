@@ -66,6 +66,8 @@ class DeviceController:
         self.video_client: Optional[Any] = None
         self.stream_touch_active: bool = False
         self.last_touch_move_time: float = 0.0
+        self.touch_daemon: Optional[Any] = None
+        self.touch_channel: Optional[str] = None
         self.log_title: str = "设备控制器"
     
     def set_display_resolution(self, video_width: int, video_height: int, canvas_width: int, canvas_height: int) -> Tuple[int, int, float]:
@@ -164,6 +166,11 @@ class DeviceController:
 
     def set_video_client(self, video_client: Optional[Any]) -> None:
         self.video_client = video_client
+
+    def set_touch_daemon(self, touch_daemon: Optional[Any]) -> None:
+        """注入设备端触控守护进程，None 表示回退服务端注入"""
+        self.touch_daemon = touch_daemon
+        self.touch_channel = None
     
     def reset(self) -> None:
         """重置控制器状态（切换设备时调用）"""
@@ -184,6 +191,8 @@ class DeviceController:
         self.video_client = None
         self.stream_touch_active = False
         self.last_touch_move_time = 0.0
+        self.touch_daemon = None
+        self.touch_channel = None
 
     def _get_touch_resolution(self) -> Tuple[int, int]:
         """Return uinput bounds in the orientation shown to the user."""
@@ -240,13 +249,50 @@ class DeviceController:
         """鼠标拖动"""
         pass  # 实时预览可以在这里实现
     
-    def _send_stream_touch(self, action: int, x: int, y: int) -> bool:
+    def _send_touch_via_daemon(self, action: int, x: int, y: int) -> bool:
+        if self.touch_daemon is None:
+            return False
+        try:
+            if self.touch_daemon.send(action, x, y):
+                return True
+            # 单次失败尝试重连一次，覆盖 fport / 守护进程抖动
+            if self.touch_daemon.reconnect():
+                return bool(self.touch_daemon.send(action, x, y))
+        except (AttributeError, OSError):
+            return False
+        return False
+
+    def _send_touch_via_stream(self, action: int, x: int, y: int) -> bool:
         if self.video_client is None:
             return False
         try:
             return bool(self.video_client.send_touch_event(action, x, y))
         except (AttributeError, OSError):
             return False
+
+    def _send_stream_touch(self, action: int, x: int, y: int) -> bool:
+        """发送触控事件：优先常驻守护进程（约 2~10ms），失败回退服务端注入（约 340ms）"""
+        if action == 1:
+            self.touch_channel = None
+        if self.touch_channel == "daemon":
+            order = ("daemon",)
+        elif self.touch_channel == "stream":
+            order = ("stream",)
+        else:
+            order = ("daemon", "stream") if self.touch_daemon is not None else ("stream",)
+        if action == 3 and self.touch_channel is not None:
+            # 抬起必须送达，通道失败时再试另一条，避免设备停留在按下状态
+            other = "stream" if self.touch_channel == "daemon" else "daemon"
+            order = order + (other,)
+        for channel in order:
+            if channel == "daemon":
+                if self._send_touch_via_daemon(action, x, y):
+                    self.touch_channel = "daemon"
+                    return True
+            elif self._send_touch_via_stream(action, x, y):
+                self.touch_channel = "stream"
+                return True
+        return False
 
     def _on_mouse_up(self, event: tk.Event) -> None:
         """鼠标释放"""

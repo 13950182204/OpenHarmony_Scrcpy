@@ -194,3 +194,63 @@ RK3568 通用资源 `Dnakeiot_RK3568`；该服务端在本镜像上所有 H.264 
   `20662d95d0655c5853a7909542214249322f29bd3b2dfa7233c4d31cc6323bc2`（构建须用 Python 3.8 + PyInstaller 6.22.0，
   `Package/build_dnakeiot_combined_windows.bat`）。
 
+## Touch Injection Daemon (2026-10-28)
+
+远程点击/拖动迟钝的根因不在坐标映射，而在注入方式：客户端原先回退到 `hdc shell uinput -T -c x y`，
+`Client/gui/device_controller.py` 的 `_send_stream_touch` 每发一个事件就 `fork()+execl("/bin/uinput")` 一次。
+实测单次 `uinput -T -c 400 300` 约 340ms（`0m00.34s real`），一次点击含 DOWN/UP 两个事件，
+因此表现为“点了半天才反应”，拖动更明显（每 16ms 一个 MOVE 全部排队）。
+
+服务端注入路径（MMI 协议 `PACKET_INPUT`）在部分镜像上同样受 uinput 影响，故新增设备端常驻守护进程：
+
+| 项目 | 内容 |
+|---|---|
+| 源码 | `tools/mmi_touchd/mmi_touchd.cpp`（Apache 头 + 协议注释） |
+| 构建 | `bash tools/mmi_touchd/build_mmi_touchd.sh [OH_ROOT] [PRODUCT_OUT]`，默认 `OH_ROOT=/home/cx/os/6.1_`、`PRODUCT_OUT=$OH_ROOT/out/a333_newpines`，产物写 `Client/bin/arm64/mmi_touchd` 并生成 `.sha256` |
+| 依赖 | `libmmi-client.z` + `libmmi-util.z`（OpenHarmony MMI proxy 客户端），静态链接 `-lc++ -lc` |
+| 产物 | `Client/bin/arm64/mmi_touchd`，24088 字节，sha256 `9bc2b6415fab891dfa49dbccca12734f2856762669caa58f664828853cc82ccf` |
+
+守护进程在设备 `/data/local/tmp/mmi_touchd <port>` 常驻，TCP 行协议（`\n` 结尾，ASCII）：
+
+```text
+P            -> ok 0                  # ping
+S            -> ok 1 <events> <pid>   # 状态
+D x y        -> ok <cost_ms>          # DOWN
+M x y        -> ok <cost_ms>          # MOVE
+U x y        -> ok <cost_ms>          # UP
+R            -> ok 3                  # 仅抬起，不移动
+Q            -> bye                   # 退出
+err ...                               # 未知命令
+```
+
+坐标为物理显示像素（与 `uinput` 一致）。stdout 无缓冲，启动打印 `mmi_touchd listening <port> pid=<pid>`，
+每 300 个事件打印一次 `events=<n> last_cost=<ms>`；`bind` 失败打印 `bind failed port=... errno=...`。
+
+### 客户端集成
+
+- 新增 `Client/core/touch_daemon.py`：`TouchDaemon(hdc_executor, log_title=...)` 负责解析本地二进制（校验 ELF64/AArch64 + 可选 `.sha256`）、
+  比对设备端 sha256（一致则跳过上传）、`hdc fport` 端口选择（27196 起扫 12 个，跳过已转发/已监听）、启动与 `_wait_ready`（连上 TCP 后还要 ping 通才算就绪）、
+  `send(action, x, y)` 与 `stop()`。`fport` 失败时会先 `fport rm` 再重试一次（历史转发残留会报 `TCP Port listen failed`）。
+- `Client/gui/device_controller.py` 的 `_send_stream_touch` 改为**通道粘滞**：手势首个 DOWN 决定走守护进程还是服务端流，
+  后续 MOVE/UP 固定同一通道（避免一次拖动里两条通道坐标互相覆盖）；UP 时若另一通道可用则补发一次，避免设备停留在“按下”状态；
+  守护进程失败会自动 `reconnect()` 重试一次，再退回 `video_client.send_touch_event`。
+- `Client/gui/main_window.py`：连接成功后 `_start_touch_daemon()`，断开时 `_stop_touch_daemon()`；部署失败只告警，不影响投屏。
+- 打包：`Package/build_dnakeiot_combined_windows.bat` 增加 `Client\bin` → staging 的 xcopy、`--add-data "bin;bin"` 与产物检查
+  `dist\OHScrcpy\_internal\bin\arm64\mmi_touchd`。运行时通过 `sys._MEIPASS` 找到该二进制。
+
+### 真机验证（device `150100424a5444345206517525298929`）
+
+- 部署与启动：`start()` 耗时 772ms（含上传、fport、等待 ping）。
+- 40 次点击：0 失败，平均 25.66ms/次（每次 3 个事件：DOWN + 2 MOVE + UP），中位数 23.4ms，最大 116ms。
+- 20 次拖动：平均 5.51ms/次，最大 9.01ms；守护进程自报 `last_cost` 2ms。
+- 对比旧路径：单事件约 340ms（`/bin/uinput`），相差两个数量级。
+- 单元测试：`python3 -m pytest tests -q` → `179 passed`（新增 `tests/test_touch_daemon.py` 22 例，含线程 TCP 假守护进程）。
+- 发布包：`Release\OHScrcpy-Dnakeiot\OHScrcpy.exe` 版本 `v2.4.2-dnakeiot`，sha256
+  `46b194881755f19d37e78cc8d221d0aa6e6e3fe9004457c7c242c047cfca375f`；`_internal\bin\arm64\mmi_touchd` 哈希与源文件一致。
+
+### 排障要点
+
+- `hdc fport tcp:X tcp:X` 报 `[Fail]TCP Port listen failed at X`：历史转发仍在（守护进程被杀后条目不自动消失），先 `fport rm`。
+- TCP 连上但 ping 无响应：`fport` 会先 accept 再拨号，首次连接出现 `WinError 10054` 属正常抖动，重试即可。
+- 设备端清理：`pkill -x mmi_touchd`（**不要**用 `pkill -f /data/local/tmp/mmi_touchd`，会连当前 shell 一起杀）。
+

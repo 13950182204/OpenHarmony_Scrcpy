@@ -25,7 +25,7 @@ from .runtime_mode import is_a333_temporary_mode, is_dnakeiot_combined_mode
 AUTHOR = "luodh0157"
 PROJECT_URL = "https://gitcode.com/OpenHarmony_Tools/OpenHarmony_Scrcpy"
 if is_dnakeiot_combined_mode():
-    VERSION = "v2.4.1-dnakeiot"
+    VERSION = "v2.4.2-dnakeiot"
 elif is_a333_temporary_mode():
     VERSION = "v2.3.2-a333-temp"
 else:

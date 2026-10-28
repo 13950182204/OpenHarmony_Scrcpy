@@ -36,6 +36,7 @@ xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\gui" "%STAGING_DIR%\gui" >nul || goto :
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\utils" "%STAGING_DIR%\utils" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\config" "%STAGING_DIR%\config" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\hdc" "%STAGING_DIR%\hdc" >nul || goto :error
+xcopy /E /I /Q /Y "%PROJECT_ROOT%\Client\bin" "%STAGING_DIR%\bin" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Server\bin\Dnakeiot" "%STAGING_DIR%\Dnakeiot" >nul || goto :error
 xcopy /E /I /Q /Y "%PROJECT_ROOT%\Server\bin\Dnakeiot_RK3568" "%STAGING_DIR%\Dnakeiot_RK3568" >nul || goto :error
 copy /Y "%PROJECT_ROOT%\Client\main.py" "%STAGING_DIR%\main.py" >nul || goto :error
@@ -53,6 +54,7 @@ python -m PyInstaller main.py --name "OHScrcpy" --noconfirm --clean --windowed -
     --add-data "%MODE_MARKER%;." ^
     --add-data "hdc\Windows\x64\hdc.exe;." ^
     --add-data "hdc\Windows\x64\libusb_shared.dll;." ^
+    --add-data "bin;bin" ^
     --add-data "config\log_config.json;config" ^
     --icon app.ico || goto :error_popd
 
@@ -62,6 +64,7 @@ if not exist "dist\OHScrcpy\_internal\Dnakeiot\server_manifest.json" goto :error
 if not exist "dist\OHScrcpy\_internal\Dnakeiot_RK3568\ohscrcpy_server" goto :error_popd
 if not exist "dist\OHScrcpy\_internal\Dnakeiot_RK3568\server_manifest.json" goto :error_popd
 if not exist "dist\OHScrcpy\_internal\%MODE_MARKER%" goto :error_popd
+if not exist "dist\OHScrcpy\_internal\bin\arm64\mmi_touchd" goto :error_popd
 
 if exist "%RELEASE_DIR%" rmdir /s /q "%RELEASE_DIR%"
 mkdir "%RELEASE_DIR%" || goto :error_popd

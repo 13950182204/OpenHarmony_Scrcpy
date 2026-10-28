@@ -39,6 +39,7 @@ from core import (
     HDCCommandExecutor,
     ServerManager,
     DeviceManager,
+    TouchDaemon,
 )
 
 from video import VideoStreamClient
@@ -86,6 +87,7 @@ class MainWindow:
         self.connection_manager: Optional[ConnectionManager] = None
         self.video_display: Optional[VideoDisplay] = None
         self.server_deployer: Optional[ServerDeployer] = None
+        self.touch_daemon: Optional[TouchDaemon] = None
         
         self.device_status_label = None
         self.status_label = None
@@ -528,6 +530,7 @@ class MainWindow:
                     self.device_controller.set_video_client(self.connection_manager.get_video_client())
                     self.device_controller.refresh_device_resolution(config.width, config.height)
                     self.device_controller.refresh_device_orientation()
+                    self._start_touch_daemon()
                     self.is_connected = True
                     self.device_panel.set_connect_button_state("断开", "#e74c3c")
                     self.connection_status_label.config(text="已连接", fg="#2ecc71")
@@ -567,9 +570,40 @@ class MainWindow:
     def _install_and_start_server(self, port: int, server_manager) -> bool:
         """安装并启动服务端"""
         return server_manager.ensure_server(port)
+
+    def _start_touch_daemon(self) -> None:
+        """部署并启动设备端触控守护进程；失败只降级为服务端注入，不影响投屏"""
+        self._stop_touch_daemon()
+        if self.hdc_executor is None or self.device_controller is None:
+            return
+        try:
+            daemon = TouchDaemon(self.hdc_executor)
+            if not daemon.start():
+                reason = daemon.last_error or "未知原因"
+                print_log(LogLevel.WARN, self.log_title, f"触控守护进程未就绪: {reason}，触控回退服务端注入")
+                return
+            self.touch_daemon = daemon
+            self.device_controller.set_touch_daemon(daemon)
+        except Exception as error:
+            print_log(LogLevel.WARN, self.log_title, f"启动触控守护进程异常: {error}")
+
+    def _stop_touch_daemon(self) -> None:
+        """停止触控守护进程并清理设备侧残留"""
+        daemon = self.touch_daemon
+        self.touch_daemon = None
+        if self.device_controller is not None:
+            self.device_controller.set_touch_daemon(None)
+        if daemon is None:
+            return
+        try:
+            daemon.stop()
+        except Exception as error:
+            print_log(LogLevel.WARN, self.log_title, f"停止触控守护进程异常: {error}")
     
     def _disconnect_device(self) -> None:
         """断开设备"""
+        self._stop_touch_daemon()
+
         if self.connection_manager is not None:
             self.connection_manager.disconnect()
         
