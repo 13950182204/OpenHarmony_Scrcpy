@@ -70,13 +70,19 @@ constexpr int DEFAULT_PORT = 27196;
 constexpr int LISTEN_BACKLOG = 4;
 constexpr int STATUS_LOG_INTERVAL = 300;
 
-int64_t NowMs()
+/*
+ * Multimodalinput timestamps are microseconds (GetSysClockTime() returns
+ * CLOCK_MONOTONIC in us and its inject tool multiplies ms by 1000). Sending
+ * millisecond stamps makes the framework read every press as hours long, so
+ * the launcher turns each tap into a long press.
+ */
+int64_t NowUs()
 {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
+    return std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-int64_t g_downTime = 0;
+int64_t g_downTimeUs = 0;
 int32_t g_lastX = 0;
 int32_t g_lastY = 0;
 int64_t g_eventCount = 0;
@@ -88,15 +94,14 @@ int SendEvent(int32_t action, int32_t x, int32_t y, bool pressed)
     if (pointerEvent == nullptr) {
         return -1;
     }
+    int64_t nowUs = NowUs();
     if (action == PointerEvent::POINTER_ACTION_DOWN) {
-        g_downTime = NowMs();
+        g_downTimeUs = nowUs;
     }
     pointerEvent->SetPointerAction(action);
     pointerEvent->SetSourceType(PointerEvent::SOURCE_TYPE_TOUCHSCREEN);
     pointerEvent->SetPointerId(0);
-    pointerEvent->SetButtonId(0);
-    pointerEvent->SetButtonPressed(pressed ? 1 : 0);
-    pointerEvent->SetActionTime(NowMs());
+    pointerEvent->SetActionTime(nowUs);
 
     PointerEvent::PointerItem item;
     item.SetPointerId(0);
@@ -105,13 +110,13 @@ int SendEvent(int32_t action, int32_t x, int32_t y, bool pressed)
     item.SetRawDisplayX(x);
     item.SetRawDisplayY(y);
     item.SetPressed(pressed);
-    item.SetDownTime(g_downTime);
+    item.SetDownTime(g_downTimeUs);
     item.SetPressure(pressed ? 0.5 : 0.0);
     pointerEvent->AddPointerItem(item);
 
-    int64_t started = NowMs();
+    int64_t startedUs = NowUs();
     InputManager::GetInstance()->SimulateInputEvent(pointerEvent);
-    return static_cast<int>(NowMs() - started);
+    return static_cast<int>((NowUs() - startedUs) / 1000);
 }
 
 bool WriteAll(int fd, const char *text)

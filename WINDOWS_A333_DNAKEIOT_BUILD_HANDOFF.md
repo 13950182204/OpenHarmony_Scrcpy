@@ -208,7 +208,7 @@ RK3568 通用资源 `Dnakeiot_RK3568`；该服务端在本镜像上所有 H.264 
 | 源码 | `tools/mmi_touchd/mmi_touchd.cpp`（Apache 头 + 协议注释） |
 | 构建 | `bash tools/mmi_touchd/build_mmi_touchd.sh [OH_ROOT] [PRODUCT_OUT]`，默认 `OH_ROOT=/home/cx/os/6.1_`、`PRODUCT_OUT=$OH_ROOT/out/a333_newpines`，产物写 `Client/bin/arm64/mmi_touchd` 并生成 `.sha256` |
 | 依赖 | `libmmi-client.z` + `libmmi-util.z`（OpenHarmony MMI proxy 客户端），静态链接 `-lc++ -lc` |
-| 产物 | `Client/bin/arm64/mmi_touchd`，24088 字节，sha256 `9bc2b6415fab891dfa49dbccca12734f2856762669caa58f664828853cc82ccf` |
+| 产物 | `Client/bin/arm64/mmi_touchd`，23728 字节，sha256 `f24e9896bf1e866f23e9333c7a3247291977430673633369b521da4956cb426a`（v2.4.3 起为微秒时间戳版本） |
 
 守护进程在设备 `/data/local/tmp/mmi_touchd <port>` 常驻，TCP 行协议（`\n` 结尾，ASCII）：
 
@@ -253,4 +253,59 @@ err ...                               # 未知命令
 - `hdc fport tcp:X tcp:X` 报 `[Fail]TCP Port listen failed at X`：历史转发仍在（守护进程被杀后条目不自动消失），先 `fport rm`。
 - TCP 连上但 ping 无响应：`fport` 会先 accept 再拨号，首次连接出现 `WinError 10054` 属正常抖动，重试即可。
 - 设备端清理：`pkill -x mmi_touchd`（**不要**用 `pkill -f /data/local/tmp/mmi_touchd`，会连当前 shell 一起杀）。
+
+## Touch Timestamp Unit Fix (2026-10-28)
+
+### 现象
+
+v2.4.2 上线后，在设备 `ea010e325333324247102b4f80429c69` 上每次点击桌面图标都会弹出「打开 / 卸载」长按菜单，
+轻点无法正常打开应用。客户端日志 `Release/OHScrcpy-Dnakeiot/logs/client_20261028_152042.log` 显示守护进程已就绪
+（`触控注入守护进程就绪，端口 27196`，无回退告警），即事件确实由守护进程注入 —— 问题在事件内容而非通道。
+
+### 根因：时间戳单位差 1000 倍
+
+multimodalinput 的事件时间单位是**微秒**：
+
+- `foundation/multimodalinput/input/util/common/src/util.cpp:67` `GetSysClockTime()` 用 `CLOCK_MONOTONIC` 计算
+  `tv_sec * 1000 * 1000 + tv_nsec / 1000`（微秒）。
+- 官方注入工具 `tools/inject_event/src/input_manager_command.cpp`（即设备上的 `/bin/uinput`）滑动分支用
+  `pointerEvent->SetActionTime(currentTimeMs * TIME_TRANSITION)`，`TIME_TRANSITION = 1000`，即毫秒乘 1000 转微秒；
+  其单指点击分支（`-T -c`）与 `-T -d/-u` 干脆**不设置** actionTime/downTime，交给框架补时间。
+- `frameworks/proxy/events/src/input_manager.cpp` 与 `frameworks/proxy/event_handler/src/input_manager_impl.cpp`
+  的 `SimulateInputEvent` 只加 `EVENT_FLAG_SIMULATE` 后就直接 `InjectPointerEvent`，**不会改写 actionTime**。
+
+守护进程 v2.4.2 用 `steady_clock` 的**毫秒**填充 `SetActionTime()` 与 `PointerItem::SetDownTime()`，
+数值量级约 1.79e12，而框架按微秒解释时当前时刻约 1.79e15 —— 每次按压的持续时长被算成数小时，
+launcher 的点击识别直接判成长按。
+
+### 修复（`tools/mmi_touchd/mmi_touchd.cpp`）
+
+- `NowMs()` → `NowUs()`：`duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count()`。
+- 全局 `g_downTime` → `g_downTimeUs`，DOWN 时记录，`PointerItem::SetDownTime()` 用同一微秒基准。
+- 注入耗时改为 `(NowUs() - startedUs) / 1000`，协议 `ok <cost_ms>` 语义不变。
+- 去掉 `SetButtonId(0)` / `SetButtonPressed(...)`：触摸屏没有按键，与 `/bin/uinput` 的实际写法一致。
+- 重新生成 `Client/bin/arm64/mmi_touchd`：23728 字节，sha256
+  `f24e9896bf1e866f23e9333c7a3247291977430673633369b521da4956cb426a`。
+
+### 真机验证（device `ea010e325333324247102b4f80429c69`，600x1024 竖屏面板 / 当前横屏 1024x600）
+
+| 步骤 | 结果 |
+|---|---|
+| 部署 | `hdc file send` + `chmod 755`，设备端 `sha256sum` 与本地一致；`fport tcp:27196 tcp:27196` |
+| 启动 | `mmi_touchd listening 27196 pid=3457`，`netstat -an` 见 `127.0.0.1:27196 LISTEN` |
+| 关闭长按菜单 | `D 300 470` + `U 300 470` → 菜单消失（此前会一直卡住） |
+| 点击图标 | `D 797 140` + `U 797 140` → 计算器打开，无长按菜单 |
+| 连续点击 | 计算器键位 (481,212)/(646,212) → 显示 `76`，每次都是独立点击 |
+| 拖动手势 | `D 512 4` → 20 个 `M` → `U 512 450` → 进入最近任务，手势被识别 |
+| 注入耗时 | `ok 3`~`ok 12`（3~12ms/事件），与 v2.4.2 的延迟水平一致 |
+
+结论：时间戳改成微秒后，点击恢复为“按下即抬起”的短按，拖动仍是连续 MOVE 序列；
+守护进程仍未设置任何 button 字段，且不再依赖框架兜底时间。
+
+### 排障顺序（复用）
+
+1. 先看客户端日志确认走的是守护进程通道还是服务端流（有 `触控注入守护进程就绪` 即守护进程）。
+2. 再比对手势语义（长按菜单 / 无响应 / 坐标错位）—— 语义错先怀疑事件字段（时间戳单位、button、pressed）。
+3. 事件字段以系统 `/bin/uinput` 为基准对齐：它能正常点击，就照它的字段集合写。
+4. 用 `snapshot_display -f` 截图闭环验证，不要只看 socket 返回的 `ok`。
 
