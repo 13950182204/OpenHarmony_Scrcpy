@@ -76,8 +76,9 @@ class IServerManager(Protocol):
         """检查是否正在运行"""
         ...
     
-    def update_manufacturer(self, manufacturer: str) -> None:
-        """更新制造商信息"""
+    def update_manufacturer(self, manufacturer: str, build_product: str = "",
+                            soc_family: str = None) -> None:
+        """更新制造商、构建产品与 SoC 家族信息"""
         ...
 
 

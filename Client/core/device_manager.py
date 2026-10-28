@@ -25,6 +25,7 @@ from .constants import DEFAULT_PORT, LogLevel
 from .logger import print_log
 from .hdc_executor import HDCCommandExecutor
 from .runtime_mode import is_a333_temporary_mode
+from .soc_profile import SOC_ALLWINNER, SOC_ROCKCHIP, SOC_UNKNOWN, SocDetection, probe_device_soc
 
 
 @dataclass
@@ -34,7 +35,12 @@ class DeviceInfo:
     model: str = "Unknown Model"
     manufacturer: str = "default"
     build_product: str = ""
-    
+    # SoC 家族（allwinner / rockchip / unknown）与判定证据，来自硬件实测，
+    # 不依赖厂商字符串；资源选择以它为准。
+    soc_family: str = SOC_UNKNOWN
+    soc_hardware: str = ""
+    soc_source: str = ""
+
     def display_name(self) -> str:
         return f"{self.sn[:8]}****{self.sn[-8:]} ({self.model})"
 
@@ -73,8 +79,12 @@ class DeviceManager:
             model = self.get_device_param(sn, "const.product.model")
             manufacturer = self.get_device_param(sn, "const.product.manufacturer")
             build_product = self.get_device_param(sn, "const.build.product")
+            soc = probe_device_soc(self.hdc, sn, self.log_title)
             devices.append(DeviceInfo(sn=sn, model=model, manufacturer=manufacturer,
-                                      build_product=build_product))
+                                      build_product=build_product,
+                                      soc_family=soc.family,
+                                      soc_hardware=soc.hardware,
+                                      soc_source=soc.source))
         
         self.devices = devices
         return devices
@@ -126,12 +136,15 @@ class DeviceManager:
             return -1
         
         output_result = result["stdout"]
-        # A333（76A/76B）与 RK3568（769）镜像均有 init 托管的 27183 旧服务，
-        # 运行时服务必须避开 DEFAULT_PORT；识别完全以 const.build.product 为准。
-        build_product = (self.current_device.build_product or "").strip()
+        # A333/A537（全志）与 RK3568 镜像均有 init 托管的 27183 旧服务，
+        # 运行时服务必须避开 DEFAULT_PORT。判定以 SoC 实测为准；
+        # 产品字符串只作兜底（子串匹配，实战板卡名为 DH-76AM-HS26A 这类复合串）。
+        device = self.current_device
+        product = (device.build_product or "").strip().upper()
         uses_a333_runtime = (
             is_a333_temporary_mode()
-            or build_product.upper() in ("76A", "76B", "769")
+            or device.soc_family in (SOC_ALLWINNER, SOC_ROCKCHIP)
+            or any(token in product for token in ("76A", "76B", "769", "RK35"))
         )
         port = DEFAULT_PORT + 1 if uses_a333_runtime else DEFAULT_PORT
         device_listening = ""
@@ -181,10 +194,12 @@ class DeviceManager:
         print_log(LogLevel.INFO, self.log_title, f"移除端口转发转发成功: [{local_port}, {remote_port}]")
         return True
     
-    def create_server_manager(self, manufacturer: str, build_product: str = ""):
-        """创建服务端管理器"""
+    def create_server_manager(self, manufacturer: str, build_product: str = "",
+                              soc_family: str = ""):
+        """创建服务端管理器（资源 profile 由 SoC 家族决定）"""
         from .server_manager import ServerManager
-        return ServerManager(manufacturer, self.hdc, build_product=build_product)
+        return ServerManager(manufacturer, self.hdc, build_product=build_product,
+                             soc_family=soc_family)
     
     def install_server(self, server_manager) -> bool:
         """安装服务端"""

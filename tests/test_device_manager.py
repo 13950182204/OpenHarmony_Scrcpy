@@ -66,15 +66,23 @@ class TestDeviceManager:
     
     @patch.object(HDCCommandExecutor, 'execute')
     def test_discover_devices_success(self, mock_execute):
-        """测试发现设备成功"""
+        """测试发现设备成功（含 SoC 硬件探测）"""
         mock_execute.side_effect = [
             {"success": True, "stdout": "device_sn_1\ndevice_sn_2"},
+            # 设备1：全志 A537，产品字符串与 SoC 家族不一致
             {"success": True, "stdout": "model1"},
             {"success": True, "stdout": "HUAWEI"},
             {"success": True, "stdout": "76A"},
+            {"success": True, "stdout": "/vendor/lib64/libawcodec_enc.z.so\n"},
+            {"success": True, "stdout": "allwinner,a537"},
+            {"success": True, "stdout": "sun65iw1p1"},
+            # 设备2：瑞芯微 RK3568
             {"success": True, "stdout": "model2"},
             {"success": True, "stdout": "default"},
             {"success": True, "stdout": "769"},
+            {"success": True, "stdout": ""},
+            {"success": True, "stdout": "rockchip,rk3568"},
+            {"success": True, "stdout": "rk3568"},
         ]
         
         mock_hdc = Mock()
@@ -84,6 +92,41 @@ class TestDeviceManager:
         manager = DeviceManager(mock_hdc)
         devices = manager.discover_devices()
         assert len(devices) == 2
+        assert devices[0].soc_family == "allwinner"
+        assert devices[0].soc_source == "codec-libs"
+        assert devices[1].soc_family == "rockchip"
+        assert devices[1].soc_source == "device-tree"
+
+    def test_discover_devices_survives_probe_failure(self):
+        """SoC 探测失败不应中断设备枚举"""
+        hdc = Mock()
+        hdc.execute.side_effect = [
+            {"success": True, "stdout": "sn1"},
+            {"success": True, "stdout": "model"},
+            {"success": True, "stdout": "DHong"},
+            {"success": True, "stdout": "DH-76AM-HS26A"},
+            {"success": False, "error": "timeout"},
+            {"success": False, "error": "timeout"},
+            {"success": False, "error": "timeout"},
+        ]
+        manager = DeviceManager(hdc)
+        devices = manager.discover_devices()
+        assert len(devices) == 1
+        assert devices[0].soc_family == "unknown"
+
+    def test_allwinner_soc_uses_runtime_port(self):
+        """SoC 实测为全志时避开 init 托管的默认端口（与产品字符串无关）"""
+        hdc = Mock()
+        hdc.execute.side_effect = [
+            {"success": True, "stdout": ""},
+            {"success": True, "stdout": ""},
+        ]
+        manager = DeviceManager(hdc)
+        manager.current_device = DeviceInfo(sn="sn", manufacturer="DHong",
+                                            build_product="DH-76AM-HS26A",
+                                            soc_family="allwinner")
+
+        assert manager.get_port_forwarding() == 27184
     
     def test_select_device(self):
         """测试选择设备"""

@@ -39,11 +39,13 @@ class ServerManager:
     """服务端管理器"""
     
     def __init__(self, manufacturer: str, hdc_executor: HDCCommandExecutor,
-                 build_product: str = "") -> None:
+                 build_product: str = "", soc_family: str = "") -> None:
         self.hdc = hdc_executor
         self.server_process: Optional[subprocess.Popen] = None
         self.manufacturer = manufacturer
         self.build_product = build_product
+        # SoC 家族（allwinner/rockchip/unknown）来自设备硬件实测，决定服务端资源 profile。
+        self.soc_family = soc_family
         self.log_title = "服务端管理器"
         # Runtime deployment is per-device and does not require the system
         # partition or an init entry. This also works on a clean device.
@@ -54,7 +56,8 @@ class ServerManager:
 
     def _refresh_resource_paths(self) -> None:
         """Refresh paths after a device or packaged resource profile changes."""
-        self.resource_profile = get_runtime_resource_profile(self.manufacturer, self.build_product)
+        self.resource_profile = get_runtime_resource_profile(
+            self.manufacturer, self.build_product, self.soc_family)
         # 二进制与 cfg 必须取自同一资源目录（_get_resource_path 对缺失目录有
         # 通用 64 位兜底）；此前 cfg 走 "default" 路径在打包环境下不存在，
         # 导致 SHA-256 校验 actual=None 而部署失败。
@@ -109,11 +112,18 @@ class ServerManager:
             print_log(LogLevel.ERROR, self.log_title, f"获取资源路径失败: {e}")
             return filename
     
-    def update_manufacturer(self, manufacturer: str, build_product: str = "") -> None:
-        """更新设备制造商与构建产品信息"""
+    def update_manufacturer(self, manufacturer: str, build_product: str = "",
+                            soc_family: Optional[str] = None) -> None:
+        """更新设备制造商、构建产品与 SoC 家族信息
+
+        soc_family 为 None 表示调用方未做实测（保留旧值）；显式传入（含空串）
+        表示切换设备后重新识别，避免上一台设备的结论残留。
+        """
         self.manufacturer = manufacturer
         if build_product:
             self.build_product = build_product
+        if soc_family is not None:
+            self.soc_family = soc_family
         self._refresh_resource_paths()
 
     def _get_server_manifest(self) -> Optional[dict]:

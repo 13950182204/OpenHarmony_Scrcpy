@@ -154,3 +154,43 @@ still run this complete `onedir` directory, with `_internal` kept next to the ex
 
 The source regression suite after aligning the device-property tests with the current `const.build.product`
 contract is `132 passed` (four Pillow deprecation warnings only).
+
+## SoC-Based Resource Selection (2026-10-28)
+
+旧规则只比对 `const.build.product` 是否**精确等于** `76A`/`76B`/`769`。实际板卡名是复合串
+（例如全志 A537 主板为 `DH-76AM-HS26A`，厂商串是 `DHong`），精确比对必然落空，于是全志板拿到
+RK3568 通用资源 `Dnakeiot_RK3568`；该服务端在本镜像上所有 H.264 标准分辨率探测都返回不支持，
+最终强制 `720x1280` 并在 `OH_VideoEncoder_Configure` 返回 err 3，表现为“TCP 已连接、零帧”。
+
+新增 `Client/core/soc_profile.py`，按硬件实测判定芯片家族（三次 hdc shell 调用，不依赖任何厂商/产品字符串）：
+
+| 优先级 | 探测 | 判据 |
+|---|---|---|
+| 1 | `ls` 候选编解码私有库（/vendor/lib64、/vendor/lib、/system/lib64） | 出现 `libawcodec_enc.z.so`/`libawcodec_dec.z.so` → `allwinner`；出现 `librockchip_mpp.z.so`/`librknnrt.so`/`librockchip_rga.z.so` → `rockchip` |
+| 2 | `cat /proc/device-tree/compatible` | 任一段匹配 `allwinner,` 或 `arm,sun[0-9]+` → `allwinner`；`rockchip,` 或 `rk|rv[0-9]{4}` → `rockchip` |
+| 3 | `param get ohos.boot.hardware` | `sun[0-9]` → `allwinner`；`rk|rv[0-9]{4}` → `rockchip` |
+
+解析 `ls` 输出时只认以 `/` 开头的行（`ls: ... No such file or directory` 也是 stdout，不能算命中）。
+`hdc` 传输会在 NUL 处截断，所以 device-tree 只依赖第一段 `allwinner,a537`；三段全失败时返回
+`unknown`，仅告警不阻断连接。
+
+`DeviceInfo.soc_family / soc_hardware / soc_source` 由 `DeviceManager.discover_devices()` 写入，
+经 `ServerManager`、`ConnectionManager`、`ServerDeployer` 透传到 `get_runtime_resource_profile()`：
+`allwinner` → `Dnakeiot`（CedarC），`rockchip` → `Dnakeiot_RK3568`。只有探测失败才回退到产品字符串，
+且兜底改为子串匹配（`76A`/`76B` → Dnakeiot，`RK35*`/`769` → Dnakeiot_RK3568），避免 `DH-76AM-HS26A` 再被漏判。
+
+### 真机验证（device `ea010e325333324247102b4f80429c69`，A537 / sun65iw1p1）
+
+- 探测结果：`family=allwinner source=codec-libs compatible=allwinner,a537 hardware=sun65iw1p1`。
+- 客户端全链路（`ensure_server`）：上传 `Server/bin/Dnakeiot`（sha256 `e9b8259...`）→ 端口 27184+ →
+  `SCREEN_INFO:600:1024:60:1500000:h264:input-v1` → 服务端日志出现
+  `Cedarc raw-buffer config: 600x1024`、`Cedarc initialized: input=600x1024 aligned_input=608x1024`。
+- 裸流探针 6 秒统计：`{CONFIG:1, SPS:1, PPS:1, KEYFRAME:7, FRAME:364}`（约 60fps）。
+- 反面验证：把 `Dnakeiot_RK3568`（sha256 `5ea0051a...`）推到同一设备，日志即走通用能力探测并
+  `OH_VideoEncoder_Configure fail, err: 3`，零帧——这正是旧的错误资源路径。
+- 单元测试：`python3 -m pytest tests` → `158 passed`（`tests/test_soc_profile.py` 覆盖分类器、探测优先级、
+  need_sn=False、回退规则）。
+- 发布包已重建：`Release\OHScrcpy-Dnakeiot\OHScrcpy.exe` 版本 `v2.4.1-dnakeiot`，sha256
+  `20662d95d0655c5853a7909542214249322f29bd3b2dfa7233c4d31cc6323bc2`（构建须用 Python 3.8 + PyInstaller 6.22.0，
+  `Package/build_dnakeiot_combined_windows.bat`）。
+

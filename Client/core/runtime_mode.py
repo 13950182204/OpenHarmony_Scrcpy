@@ -29,22 +29,34 @@ def is_dnakeiot_combined_mode() -> bool:
     return _marker_exists(_COMBINED_MARKER)
 
 
-def get_runtime_resource_profile(manufacturer: str, build_product: str = "") -> str:
+def get_runtime_resource_profile(manufacturer: str, build_product: str = "",
+                                 soc_family: str = "") -> str:
     """Resolve the bundled service resource profile for the running package.
 
-    设备识别以 `const.build.product` 为准：
-      - 76A / 76B            → A333 定制资源（Dnakeiot，CedarC 硬编）
-      - 769                  → Dnakeiot_RK3568（标准 OH_VideoEncoder 通用编码）
-      - 其他任何值（含 default/未知厂商）→ Dnakeiot_RK3568（通用 64 位编码，
-        不依赖 libawcodec_enc 等厂商私有库）
+    设备识别以 SoC 家族（soc_profile.probe_device_soc 的实测结论）为准：
+      - allwinner（A333/A537 同族）→ Dnakeiot（CedarC 硬编，NEEDED libawcodec_enc.z.so）
+      - rockchip（RK3568/RK3588 等）→ Dnakeiot_RK3568（标准 OH_VideoEncoder 通用编码）
+      - 未知 → 回退到 `const.build.product` 字符串规则（仅兜底，soc_profile 会告警）：
+          产品名含 76A / 76B → Dnakeiot；含 RK35xx 或等于 769 → Dnakeiot_RK3568；
+          其余 → Dnakeiot_RK3568。字符串按子串匹配，因为实际板卡名形如
+          "DH-76AM-HS26A"，精确相等会漏判。
 
     资源目录名即 profile 名（打包于 _internal/<profile>/）。
     """
+    # 延迟导入：constants -> runtime_mode -> soc_profile -> constants 会形成环，
+    # 这里只在真正解析 profile 时才需要 soc_profile 的家族常量。
+    from .soc_profile import SOC_ALLWINNER, SOC_ROCKCHIP
+
     if is_a333_temporary_mode():
         return "Dnakeiot"
-    product = build_product.strip() if build_product else ""
-    if product.upper() in ("76A", "76B"):
+    if soc_family == SOC_ALLWINNER:
         return "Dnakeiot"
-    if product == "769":
+    if soc_family == SOC_ROCKCHIP:
         return "Dnakeiot_RK3568"
+    product = build_product.strip().upper() if build_product else ""
+    # 先判 Rockchip 型号，避免 "RK3568-76A" 这类复合名被 76A 规则抢走。
+    if product == "769" or "RK35" in product:
+        return "Dnakeiot_RK3568"
+    if "76A" in product or "76B" in product:
+        return "Dnakeiot"
     return "Dnakeiot_RK3568"
