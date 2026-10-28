@@ -195,7 +195,17 @@ class DeviceController:
         self.touch_channel = None
 
     def _get_touch_resolution(self) -> Tuple[int, int]:
-        """Return uinput bounds in the orientation shown to the user."""
+        """Return the display coordinate space accepted by uinput.
+
+        When the server announces the applied frame rotation, the streamed
+        video size is exactly the user-visible logical display, which is the
+        coordinate space multimodalinput exposes to injection tools. Older
+        servers keep using the physical panel size combined with the
+        persist.sys.orientation value.
+        """
+        server_rotation = getattr(self.video_client, "server_rotation", None)
+        if isinstance(server_rotation, int) and self.video_width and self.video_height:
+            return self.video_width, self.video_height
         if self.display_rotation in (90, 270):
             return self.device_height, self.device_width
         return self.device_width, self.device_height

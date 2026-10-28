@@ -5,6 +5,6 @@
   "target_abi": "aarch64",
   "protocol": "h264-tcp-v1+input-v1",
   "canvas": "display-native",
-  "sha256": "b6aeaa64a51d2dab8180740538e473766dbbb446dd2059f2cfc1a51739e74a20",
+  "sha256": "5fe999f330e92ceabab647c373caf237e1dbbdba7caec06ff09708182cf67d38",
   "config_sha256": "6a63d4d1a5d7897f808641da1c44da164878d73ecf58c7646b1adae360f8a469"
 }

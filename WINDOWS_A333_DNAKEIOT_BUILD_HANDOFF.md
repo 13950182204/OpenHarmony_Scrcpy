@@ -361,3 +361,55 @@ cp .build_out/ohscrcpy_server_cedarc Server/bin/Dnakeiot/ohscrcpy_server
 
 装完必须同步 `Server/bin/Dnakeiot/server_manifest.json` 的 `sha256`（客户端
 `ServerManager._validate_local_server_resource()` 会校验），否则启动前即报资源无效。
+
+## 显示方向协议（v2.4.5 修复：横屏被显示成竖屏）
+
+### 现象
+
+A537（`ea010e325333324247102b4f80429c69`，600x1024 面板、逻辑 1024x600 横屏）在
+v2.4.4 客户端里被显示成 600x1024 竖屏，画面内容侧躺：GUI 叠加层显示
+`视频: 600x1024`，而服务端日志与 `SCREEN_INFO` 都是 1024x600。
+
+### 根因
+
+1. v2.4.4 起服务端已按 `rotateDegrees` 把原始缓冲旋转到用户可见方向后再编码，
+   所以 `SCREEN_INFO` 与码流都是 1024x600。
+2. 客户端 `VideoDisplay._orient_frame()` 仍按 `persist.sys.orientation`
+   （该设备为 `2`，映射 90°）对每帧再旋转一次，于是 1024x600 被转成
+   600x1024，内容侧躺 —— 双重旋转。
+
+### 协议变更
+
+`SCREEN_INFO` 行末尾新增 `rot` 字段，表示服务端已把原始帧顺时针旋转的角度：
+
+```
+SCREEN_INFO:1024:600:60:1500000:h264:input-v1:rot=90
+```
+
+- 旧服务端没有该字段，客户端保留旧的补偿逻辑（向后兼容 RK3568 预置二进制）。
+- 新客户端 `VideoStreamClient.server_rotation` 解析该字段；
+  `VideoDisplay._resolve_frame_rotation()` 在字段存在时返回 0，不再叠加旋转；
+  `DeviceController._get_touch_resolution()` 在字段存在时返回视频尺寸，
+  即 multimodalinput 接受注入的可见逻辑坐标系。
+- `resetVideoOutput()` 的相等性判断加入 `rotateDegrees`，方向变化会重建编码器。
+
+### 怎么确认当前屏幕是横还是竖
+
+按可信度从高到低：
+
+| 手段 | 命令或日志 | 说明 |
+| --- | --- | --- |
+| DisplayManager（服务端权威） | 服务端日志 `Display geometry: logical=1024x600 physical=0x0 rotation=1 rotateDegrees=90 refresh=61` | 与合成器同源，`logical` 即用户可见方向；`physical=0x0` 表示面板不上报物理尺寸 |
+| 客户端收到的配置 | 客户端日志 `解析配置: 1024x600@60fps` 与 `服务端已按显示方向旋转 90 度，跳过客户端旋转` | 证明码流方向 |
+| 系统截图（地面真值） | `hdc shell snapshot_display -f /data/local/tmp/s.jpg` 输出 `width: 1024, height: 600` | 系统截图服务会旋转，最接近用户看到的样子 |
+| RenderService hidumper（易误读） | `hdc shell hidumper -s RenderService -a screen` 里的 `render resolution=600x1024` | 物理帧缓冲尺寸，不反映旋转，A537 上会与可见方向相反，不能单独用它判断横竖屏 |
+| 持久化设置（旁证） | `hdc shell param get persist.sys.orientation`（1 竖屏 / 2 横屏 / 3 反向竖屏 / 4 反向横屏） | 只是设置值，可能滞后于实际旋转 |
+
+### 实测（v2.4.5 构建，sha256 `5fe999f330e92ceabab647c373caf237e1dbbdba7caec06ff09708182cf67d38`）
+
+| 设备 | 几何 | 服务端声明 | 结果 |
+| --- | --- | --- | --- |
+| `ea010e…` | logical=1024x600 physical=0x0 rotation=1 | `rot=90`，编码 1024x600 | 视频 1024x600 正向，叠加层 FPS 50、视频 1024x600、显示 980x574 |
+| `150100…` | logical=1280x800 physical=800x1280 rotation=3 | `rot=0`，编码 1280x800 | 1280x800 正向，客户端不再叠加自身旋转 |
+
+单测：`python3 -m pytest tests -q` → 186 passed。

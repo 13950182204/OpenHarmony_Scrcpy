@@ -40,6 +40,8 @@ class VideoStreamClient:
         self.is_connected: bool = False
         self.is_streaming: bool = False
         self.supports_stream_input: bool = False
+        # 服务端是否已把画面旋转到用户可见方向（None 表示旧服务端未声明）
+        self.server_rotation: Optional[int] = None
         self.config: VideoStreamConfig = VideoStreamConfig()
         self.device_manager: DeviceManager = device_manager
         
@@ -182,6 +184,7 @@ class VideoStreamClient:
                                 self.config.bitrate = int(parts[4])
                                 self.config.codec = parts[5] if len(parts) > 5 else "h264"
                                 self.supports_stream_input = len(parts) > 6 and parts[6] == "input-v1"
+                                self.server_rotation = self._parse_server_rotation(parts)
                                 print_log(LogLevel.INFO, self.log_title, f"解析配置:"
                                       f" {self.config.width}x{self.config.height}@{self.config.fps}fps"
                                       f" bitrate:{self.config.bitrate} codec:{self.config.codec}")
@@ -205,6 +208,23 @@ class VideoStreamClient:
         except Exception as e:
             print_log(LogLevel.ERROR, self.log_title, f"接收配置失败: {e}")
             return False
+
+    @staticmethod
+    def _parse_server_rotation(parts):
+        """解析服务端声明的画面旋转角度。
+
+        配置行形如 SCREEN_INFO:w:h:fps:bitrate:codec:input-v1:rot=90，
+        其中 rot 表示服务端已经把原始帧顺时针旋转了多少度后再编码。
+        旧服务端没有该字段，返回 None 让客户端保留旧的补偿逻辑。
+        """
+        for token in parts[7:]:
+            if not token.startswith("rot="):
+                continue
+            try:
+                return int(token[4:]) % 360
+            except ValueError:
+                return None
+        return None
 
     def _start_workers(self) -> None:
         """启动工作线程"""
@@ -610,6 +630,7 @@ class VideoStreamClient:
         self.is_connected = False
         self.is_streaming = False
         self.supports_stream_input = False
+        self.server_rotation = None
         
         self.frame_count: int = 0
         self.total_bytes: int = 0

@@ -437,7 +437,8 @@ public:
             std::to_string(info.height) + ":" +
             std::to_string(info.fps) + ":" +
             std::to_string(info.bitrate) + ":" +
-            info.codec + ":input-v1\n";
+            info.codec + ":input-v1:rot=" +
+            std::to_string(info.rotateDegrees) + "\n";
 
         bool succ = sendData(config_str.c_str(), config_str.length());
         if (succ) {
@@ -883,7 +884,8 @@ public:
         if ((nextScreenInfo.width == screen_info_.width) &&
             (nextScreenInfo.height == screen_info_.height) &&
             (nextScreenInfo.codec == screen_info_.codec) &&
-            (nextScreenInfo.bitrate == screen_info_.bitrate)) {
+            (nextScreenInfo.bitrate == screen_info_.bitrate) &&
+            (nextScreenInfo.rotateDegrees == screen_info_.rotateDegrees)) {
             return;
         }
         LOG_INFO(LOG_TAG, "Resolution is changed, reset video output: displayId[" + std::to_string(displayId) + "] resolution[" + std::to_string(width) + "x" + std::to_string(height) + "]");

@@ -266,6 +266,20 @@ class TestDeviceControllerReuse:
         assert controller._get_touch_resolution() == (1280, 800)
         assert controller._window_to_device_coords(1071, 671) == (1279, 799)
 
+    def test_touch_resolution_prefers_server_oriented_video(self, controller):
+        """服务端声明旋转时，uinput 坐标系就是可见画面尺寸"""
+        controller.bind_video_canvas(Mock())
+        controller.device_width = 600
+        controller.device_height = 1024
+        controller.display_rotation = 0
+        controller.video_width = 1024
+        controller.video_height = 600
+        server_client = Mock()
+        server_client.server_rotation = 90
+        controller.set_video_client(server_client)
+
+        assert controller._get_touch_resolution() == (1024, 600)
+
     def test_canvas_drag_uses_stream_touch_events(self, controller):
         stream_client = Mock()
         stream_client.send_touch_event.return_value = True
@@ -417,6 +431,23 @@ class TestVideoDisplayReset:
         assert oriented.size == expected_size
         assert list(oriented.getdata()) == expected_pixels
         assert video_display.frame_rotation == rotation
+
+    def test_frame_rotation_skipped_when_server_reports_rotation(self, video_display):
+        """服务端已旋转画面时客户端不得再旋转一次"""
+        server_client = Mock()
+        server_client.server_rotation = 90
+        connection_manager = Mock()
+        connection_manager.get_video_client = Mock(return_value=server_client)
+        video_display.connection_manager = connection_manager
+        video_display.device_controller.get_display_rotation.return_value = 90
+        frame = Image.new("L", (3, 2))
+        frame.putdata([1, 2, 3, 4, 5, 6])
+
+        oriented = video_display._orient_frame(frame)
+
+        assert oriented.size == (3, 2)
+        assert list(oriented.getdata()) == [1, 2, 3, 4, 5, 6]
+        assert video_display.frame_rotation == 0
 
 class TestFullIntegrationScenario:
     """完整集成场景测试"""

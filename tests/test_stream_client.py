@@ -262,3 +262,18 @@ class TestVideoStreamClientStatistics:
         assert client.frame_count == 100
         assert client.total_bytes == 1024
         assert client.decode_failure == 5
+
+class TestServerRotationParsing:
+    """配置行里服务端旋转角度的解析"""
+
+    @pytest.mark.parametrize(
+        "parts, expected",
+        [
+            (["SCREEN_INFO", "1280", "800", "60", "1500000", "h264", "input-v1", "rot=90"], 90),
+            (["SCREEN_INFO", "800", "1280", "60", "1500000", "h264", "input-v1", "rot=0"], 0),
+            (["SCREEN_INFO", "800", "1280", "60", "1500000", "h264", "input-v1"], None),
+            (["SCREEN_INFO", "800", "1280", "60", "1500000", "h264", "input-v1", "rot=abc"], None),
+        ],
+    )
+    def test_parse_server_rotation(self, parts, expected):
+        assert VideoStreamClient._parse_server_rotation(parts) == expected

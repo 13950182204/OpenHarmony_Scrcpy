@@ -51,6 +51,7 @@ class VideoDisplay:
         self.source_video_width = 0
         self.source_video_height = 0
         self.frame_rotation = 0
+        self._server_rotation_logged = False
         self.video_ratio = 0.0
         self.display_width = 0
         self.display_height = 0
@@ -101,9 +102,36 @@ class VideoDisplay:
             self._render_scheduled = True
             self._render_after_id = self.root.after(delay_ms, self._do_render)
 
+    def _resolve_frame_rotation(self) -> int:
+        """Return the rotation still required on the client side.
+
+        Newer servers rotate the captured buffer to the user-visible
+        orientation and report it as rot=<degrees> in the config line.
+        In that case the client must not rotate again: double rotation
+        shows a landscape screen as a sideways portrait picture. Older
+        servers omit the field and keep relying on persist.sys.orientation.
+        """
+        video_client = None
+        if self.connection_manager is not None:
+            try:
+                video_client = self.connection_manager.get_video_client()
+            except (AttributeError, TypeError):
+                video_client = None
+        server_rotation = getattr(video_client, "server_rotation", None)
+        if isinstance(server_rotation, int):
+            if server_rotation and not self._server_rotation_logged:
+                self._server_rotation_logged = True
+                print_log(
+                    LogLevel.INFO,
+                    self.log_title,
+                    f"服务端已按显示方向旋转 {server_rotation} 度，跳过客户端旋转",
+                )
+            return 0
+        return self.device_controller.get_display_rotation() if self.device_controller else 0
+
     def _orient_frame(self, frame: Image.Image) -> Image.Image:
-        """Apply the rotation selected from persist.sys.orientation."""
-        rotation = self.device_controller.get_display_rotation() if self.device_controller else 0
+        """Apply the rotation still required for this stream."""
+        rotation = self._resolve_frame_rotation()
         self.frame_rotation = rotation if rotation in (0, 90, 180, 270) else 0
         if self.frame_rotation == 90:
             return frame.transpose(Image.Transpose.ROTATE_270)
@@ -298,6 +326,7 @@ class VideoDisplay:
         self.source_video_width = 0
         self.source_video_height = 0
         self.frame_rotation = 0
+        self._server_rotation_logged = False
         self.video_ratio = 0.0
         self.display_width = 0
         self.display_height = 0
